@@ -111,7 +111,6 @@ namespace Config {
   // Hugging Face FastAPI Space host.
   // Format: {hf-username}-{space-name}.hf.space
   // The firmware POSTs to https://{HF_HOST}/ingest every 60 s.
-  // Replace the placeholder below with your actual HF Space URL.
   constexpr char HF_HOST[] = "YOUR-HF-USERNAME-YOUR-SPACE-NAME.hf.space";
 
   // Timing (all in milliseconds unless noted).
