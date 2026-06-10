@@ -4,55 +4,58 @@
  * PROJECT   : Personalized Anxiety Detection -- Phase 2
  *             Wearable Data Collection Firmware
  * AUTHOR    : Sendanayake H.D. (IT22107596)
- * VERSION   : 2.0.0
+ * VERSION   : 2.1.0
  * =============================================================
  *
- * CHANGELOG v2.0.0
- *   Replaced Firebase RTDB with direct HTTPS POST to the
- *   Hugging Face FastAPI production server (/ingest).
+ * CHANGELOG v2.1.0
+ *   Payload field names and structure now exactly match the
+ *   RawSensorPayload Pydantic model in main.py on the HF Space:
+ *     user_id, sampling_rate, ecg, resp, temp, acc_x, acc_y, acc_z
  *
- *   Removed the session-based path structure (subject/session
- *   hierarchy). The backend now identifies data using user_id
- *   tags in InfluxDB, so sessions are not needed.
+ *   Added a 12,100-sample raw ECG buffer (200 Hz x 60 s) so
+ *   the backend's nk.ecg_clean() + nk.ecg_peaks() pipeline
+ *   receives the actual waveform. The firmware previously sent
+ *   only pre-computed RR intervals, which the /ingest endpoint
+ *   cannot process.
  *
- *   Added raw sensor buffers (accel x/y/z, strain, temp) so
- *   the backend scipy/NeuroKit2 pipeline receives real signal
- *   arrays for gravity removal, peak extraction, and
- *   respiration rate cleaning -- exactly what /ingest expects.
+ *   strain_raw renamed to resp (respiration via strain gauge).
+ *   temp_c renamed to temp.
+ *   accel_x/y/z renamed to acc_x/y/z.
+ *   Removed: rr_ms, window_ts, fw_version, ecg_sample_hz,
+ *             slow_sample_hz, leads_on (not in Pydantic model).
  *
- *   On-device HRV computation is kept for OLED display and
- *   serial diagnostics only. The server runs its own
- *   independent feature extraction from the raw payload.
- *
- *   Renamed SUBJECT_ID to USER_ID to match backend convention.
- *   Removed all session ID generation and session info uploads.
- *
- * =============================================================
- * RAW PAYLOAD SENT TO POST /ingest (every 60 seconds):
- *
- *   user_id        Unique user identifier string
- *   window_ts      Timestamp YYYYMMDD_HHMMSS (NTP, UTC+5:30)
- *   fw_version     Firmware version string
- *   ecg_sample_hz  200 (sampling rate used for ECG capture)
- *   slow_sample_hz ~6.67 (polling rate for IMU, temp, strain)
- *   leads_on       Bool, true when AD8232 electrodes attached
- *   rr_ms[]        RR intervals in ms (from on-device detection)
- *   accel_x[]      BMI160 x-axis raw counts (16384 LSB per g)
- *   accel_y[]      BMI160 y-axis raw counts
- *   accel_z[]      BMI160 z-axis raw counts
- *   strain_raw[]   BF350 ADC readings (12-bit, 0-4095)
- *   temp_c[]       DS18B20 skin temperature samples (deg C)
- *
- *   NOTE: Field names must match the Pydantic model in
- *   main.py on your HF Space. Update them there or here if
- *   they diverge.
+ *   Replaced setInsecure() with setCACert() using the ISRG
+ *   Root X1 CA cert (Let's Encrypt root that signs *.hf.space).
+ *   A placeholder guard falls back to insecure mode and logs a
+ *   warning if the cert has not been filled in yet.
  *
  * =============================================================
- * 11 ON-DEVICE FEATURES (display only, not sent in payload):
- *   mean_HR, mean_RR, SDNN, RMSSD, pNN50
- *   mean_BR, std_BR
- *   mean_temp, std_temp
- *   mean_acc_mag, std_acc_mag
+ * KNOWN MULTI-RATE MISMATCH (must fix in main.py eventually):
+ *   main.py uses a single sampling_rate for ALL signals.
+ *   ECG is sampled at 200 Hz; acc/resp/temp are at ~6.67 Hz.
+ *   This firmware sends sampling_rate = 200 (the ECG rate).
+ *   Consequence: HRV extraction is correct. The Butterworth
+ *   high-pass for acc and nk.rsp_rate() for resp will receive
+ *   the wrong fs value and produce inaccurate feature values
+ *   for those channels. Fix: add slow_sample_hz to the Pydantic
+ *   model in main.py and use it for acc/resp processing.
+ *
+ * =============================================================
+ * PAYLOAD SENT TO POST /ingest (every 60 seconds):
+ *   user_id        string  -- user identifier
+ *   sampling_rate  int     -- ECG sampling rate (200 Hz)
+ *   ecg            float[] -- raw ADC waveform at 200 Hz
+ *   resp           float[] -- strain gauge ADC at ~6.67 Hz
+ *   temp           float[] -- skin temperature (deg C) ~0.5 Hz
+ *   acc_x          float[] -- BMI160 x-axis raw counts ~6.67 Hz
+ *   acc_y          float[] -- BMI160 y-axis raw counts
+ *   acc_z          float[] -- BMI160 z-axis raw counts
+ *
+ * =============================================================
+ * SECURITY NOTE (GitHub):
+ *   SSID and PASSWORD in Config are hardcoded. Do NOT push this
+ *   file to a public repo with real credentials. Either move
+ *   them to a gitignored secrets.h or use WiFi provisioning.
  *
  * =============================================================
  * HARDWARE
@@ -62,20 +65,6 @@
  *   DS18B20 Temp  -- OneWire GPIO2
  *   BF350   Resp  -- Analog GPIO3 (strain gauge)
  *   SSD1306 OLED  -- I2C SDA=8, SCL=9, addr 0x3C (128x64)
- *
- * =============================================================
- * ECG SAMPLING RATE
- *   200 Hz (5 ms interval). Halves RR timing error from
- *   +/-10 ms (100 Hz) to +/-5 ms. Matters for pNN50 accuracy
- *   since the threshold is 50 ms.
- *
- * =============================================================
- * SECURITY NOTE
- *   postToServer() uses setInsecure() to skip TLS certificate
- *   verification. This is acceptable during development.
- *   For production, replace setInsecure() with setCACert()
- *   using the ISRG Root X1 PEM (Let's Encrypt root CA that
- *   signs Hugging Face Space certificates).
  * =============================================================
  */
 
@@ -95,25 +84,58 @@
 
 
 // =============================================================
+//  ISRG ROOT X1 CA CERTIFICATE
+//  Let's Encrypt signs *.hf.space certificates using this root.
+//
+//  HOW TO FILL THIS IN:
+//    1. Go to https://letsencrypt.org/certificates/
+//    2. Under "Root Certificates" click "ISRG Root X1 (PEM)"
+//       or directly fetch: https://letsencrypt.org/certs/isrgrootx1.pem
+//    3. Copy the entire block (-----BEGIN ... -----END-----) and
+//       paste it between the R"EOF( and )EOF" delimiters below.
+//
+//  UNTIL you fill this in the firmware falls back to insecure
+//  mode and logs a warning on Serial -- functional for dev,
+//  NOT acceptable for production deployment.
+//
+//  Cert SHA-256: 96:BC:EC:06:26:49:76:F3:74:60:77:9A:CB:28:5A:24
+//                52:A9:6E:25:75:3F:F7:C5:73:7E:F9:F2:2B:96:F2:07
+//  Expiry: 4 June 2035
+// =============================================================
+static const char HF_CA_CERT[] = R"EOF(
+REPLACE_ME -- paste the ISRG Root X1 PEM content here.
+Fetch from: https://letsencrypt.org/certs/isrgrootx1.pem
+)EOF";
+
+// Helper: returns true if the cert placeholder has been filled.
+inline bool certIsLoaded() {
+  return (strncmp(HF_CA_CERT, "\nREPLACE_ME", 11) == 0) ? false : true;
+}
+
+
+// =============================================================
 //  CONFIGURATION
 //  Edit ONLY this section to change user, WiFi, and HF server.
+//
+//  WiFi credentials are hardcoded here. Do NOT commit this file
+//  to a public GitHub repo. Move SSID/PASSWORD to a gitignored
+//  secrets.h if you need version control for the rest.
 // =============================================================
 namespace Config {
 
-  // User identifier. Must match the user_id registered in the
-  // backend and used to tag InfluxDB measurements.
-  constexpr char USER_ID[] = "P001";   // CHANGE PER USER
+  // User identifier -- must match the user_id tag in InfluxDB.
+  constexpr char USER_ID[]  = "P001";   // CHANGE PER USER
 
-  // WiFi credentials.
+  // WiFi -- see security note in file header.
   constexpr char SSID[]     = "SLT FIBER";
   constexpr char PASSWORD[] = "20hOmewIFi25";
 
-  // Hugging Face FastAPI Space host.
-  // Format: {hf-username}-{space-name}.hf.space
-  // The firmware POSTs to https://{HF_HOST}/ingest every 60 s.
-  constexpr char HF_HOST[] = "YOUR-HF-USERNAME-YOUR-SPACE-NAME.hf.space";
+  // Hugging Face FastAPI Space.
+  // Format: {hf-username}-{space-name}.hf.space (lowercase, hyphens).
+  // This resolves to https://dewdu-physiological-anxiety-escalation.hf.space/ingest
+  constexpr char HF_HOST[] = "dewdu-physiological-anxiety-escalation.hf.space";
 
-  // Timing (all in milliseconds unless noted).
+  // Timing (milliseconds unless noted).
   constexpr uint32_t WINDOW_DURATION_MS = 60000UL;
   constexpr uint32_t OLED_INTERVAL      = 300UL;
   constexpr uint32_t SERIAL_INTERVAL    = 1000UL;
@@ -126,8 +148,7 @@ namespace Config {
   constexpr int   DST_OFFSET_SEC = 0;
   constexpr char  NTP_SERVER[]   = "pool.ntp.org";
 
-  // Watchdog timeout. Must exceed HTTPS_TIMEOUT_MS plus
-  // TLS handshake time (~3-5 s) plus processing overhead.
+  // Watchdog: must exceed HTTPS_TIMEOUT_MS + TLS handshake (~5 s).
   constexpr uint32_t WDT_TIMEOUT_SEC = 40;
 
   // GPIO Pins.
@@ -135,9 +156,9 @@ namespace Config {
   constexpr uint8_t SCL_PIN     = 9;
   constexpr uint8_t DS18B20_PIN = 2;
   constexpr uint8_t STRAIN_PIN  = 3;
-  constexpr uint8_t ECG_PIN     = 4;   // AD8232 analog output
-  constexpr uint8_t LO_PLUS     = 5;   // AD8232 leads-off (+)
-  constexpr uint8_t LO_MINUS    = 6;   // AD8232 leads-off (-)
+  constexpr uint8_t ECG_PIN     = 4;
+  constexpr uint8_t LO_PLUS     = 5;
+  constexpr uint8_t LO_MINUS    = 6;
 
   // I2C addresses.
   constexpr uint8_t BMI160_ADDR = 0x69;
@@ -148,8 +169,7 @@ namespace Config {
   constexpr float ADC_MAX   = 4095.0f;
 
   // ECG / Heart Rate.
-  // 5 ms = 200 Hz. Halves RR timing error vs 100 Hz.
-  constexpr uint32_t ECG_SAMPLE_INTERVAL = 5;
+  constexpr uint32_t ECG_SAMPLE_INTERVAL = 5;    // 5 ms = 200 Hz
   constexpr uint8_t  BPM_RATE_SIZE       = 10;
   constexpr float    BPM_MIN             = 30.0f;
   constexpr float    BPM_MAX             = 200.0f;
@@ -157,19 +177,10 @@ namespace Config {
   constexpr float    ECG_THRESH_RATIO    = 0.40f;
   constexpr float    ECG_HYST_RATIO      = 0.15f;
   constexpr int      ECG_ADAPT_DECAY     = 1;
-
-  // 5 seconds settle before recording RR intervals.
-  // Gives the adaptive threshold time to learn the signal.
-  constexpr uint32_t ECG_SETTLE_MS = 5000;
-
-  // Valid RR interval range.
-  constexpr float RR_MIN_MS = 300.0f;   // 200 BPM max (panic)
-  constexpr float RR_MAX_MS = 2000.0f;  // 30  BPM min
-
-  // Ectopic beat filter. Any RR interval deviating more than
-  // 20% from the running mean is excluded. 20% matches
-  // NeuroKit2's default artifact correction threshold.
-  constexpr float RR_ECTOPIC_THRESH = 0.20f;
+  constexpr uint32_t ECG_SETTLE_MS       = 5000;
+  constexpr float    RR_MIN_MS           = 300.0f;
+  constexpr float    RR_MAX_MS           = 2000.0f;
+  constexpr float    RR_ECTOPIC_THRESH   = 0.20f;
 
   // Respiration.
   constexpr uint8_t  RESP_FILTER_SIZE  = 5;
@@ -179,25 +190,29 @@ namespace Config {
   constexpr float    RESP_MAX          = 40.0f;
   constexpr uint32_t RESP_MIN_INTERVAL = 1500UL;
 
-  // Accumulation buffer sizes.
-  // 200 BPM x 60 s = 200 beats max; 256 gives headroom.
+  // Raw ECG buffer: 200 Hz x 60 s + headroom.
+  // main.py's /ingest runs nk.ecg_clean() + nk.ecg_peaks() on
+  // this waveform -- it needs the full ADC sample array, not RR
+  // intervals. At uint16_t this occupies 24.2 KB of SRAM.
+  constexpr uint16_t ECG_RAW_BUF_SIZE = 12100;
+
+  // Slow sensor buffer: 150 ms interval → ~400 samples per window.
+  constexpr uint16_t SLOW_BUF_SIZE = 440;
+
+  // Temperature buffer: 2 s interval → 30 samples per window.
+  constexpr uint8_t TEMP_BUF_SIZE = 36;
+
+  // Feature accumulation.
   constexpr uint16_t RR_BUFFER_SIZE = 256;
-  // 40 breaths/min x 60 s = 40 max.
-  constexpr uint8_t BR_BUFFER_SIZE  = 60;
-  // 150 ms interval -> ~400 samples per 60 s window; 440 = headroom.
-  constexpr uint16_t SLOW_BUF_SIZE  = 440;
-  // 2 s interval -> 30 temp samples per window; 36 = headroom.
-  constexpr uint8_t TEMP_BUF_SIZE   = 36;
+  constexpr uint8_t  BR_BUFFER_SIZE = 60;
+  constexpr uint8_t  MIN_VALID_RR   = 20;
 
-  // Minimum valid RR count for a HRV-valid display window.
-  constexpr uint8_t MIN_VALID_RR = 20;
-
-  // BMI160 default +/-2g range gives 16384 LSB per g.
+  // BMI160 default +/-2g: 16384 LSB per g.
   constexpr float BMI160_ACC_SCALE_G = 16384.0f;
 
-  // Minimum free heap required before attempting an upload.
-  // TLS handshake alone consumes ~60 KB.
-  constexpr uint32_t MIN_HEAP_FOR_UPLOAD = 32000UL;
+  // Minimum free heap before attempting an upload.
+  // Budget: TLS context ~60 KB + 75 KB payload String + headroom.
+  constexpr uint32_t MIN_HEAP_FOR_UPLOAD = 160000UL;
 
   // OLED.
   constexpr uint8_t SCREEN_W   = 128;
@@ -205,7 +220,7 @@ namespace Config {
   constexpr uint8_t OLED_PAGES = 4;
 
   // Firmware version.
-  constexpr char FW_VERSION[] = "2.0.0-R26DS012";
+  constexpr char FW_VERSION[] = "2.1.0-R26DS012";
 }
 
 
@@ -213,14 +228,12 @@ namespace Config {
 //  DATA STRUCTURES
 // =============================================================
 
-// Heart rate display and ECG detection state.
 struct HeartRateData {
   float bpm            = 0.0f;
   int   bpmAvg         = 0;
   int   ecgValue       = 0;
   int   ecgSmoothed    = 0;
   bool  leadsConnected = false;
-
   float rates[Config::BPM_RATE_SIZE] = {0.0f};
   byte  rateSpot          = 0;
   long  lastBeat          = 0;
@@ -229,17 +242,12 @@ struct HeartRateData {
   unsigned long leadsConnectedAt = 0;
 };
 
-// Accumulates beat-to-beat RR intervals across the current
-// 60-second window. runMean is the EMA of accepted intervals,
-// used by the ectopic beat filter.
 struct RRBuffer {
   float    intervals[Config::RR_BUFFER_SIZE] = {0.0f};
   uint16_t count   = 0;
-  float    runMean = 700.0f;   // Seeded at ~86 BPM resting rate
+  float    runMean = 700.0f;
 };
 
-// HRV features computed on-device for display purposes only.
-// Formulas match NeuroKit2 hrv_time() exactly.
 struct HRVFeatures {
   float    mean_HR = 0.0f;
   float    mean_RR = 0.0f;
@@ -250,20 +258,15 @@ struct HRVFeatures {
   uint16_t n_rr    = 0;
 };
 
-// Accumulates breathing rate samples across the current window.
 struct BRBuffer {
   float   rates[Config::BR_BUFFER_SIZE] = {0.0f};
   uint8_t count = 0;
 };
 
-// Welford online algorithm for running mean and standard deviation.
-// O(1) memory regardless of sample count. Used for temp and
-// accelerometer magnitude stats shown on the OLED.
 struct WelfordState {
   uint32_t n    = 0;
   double   mean = 0.0;
   double   M2   = 0.0;
-
   void update(float x) {
     n++;
     double delta  = (double)x - mean;
@@ -271,15 +274,13 @@ struct WelfordState {
     double delta2 = (double)x - mean;
     M2           += delta * delta2;
   }
-
   float getMean()   const { return (n > 0) ? (float)mean : 0.0f; }
   float getStddev() const { return (n > 1) ? (float)sqrt(M2 / (double)(n-1)) : 0.0f; }
   void  reset()           { n = 0; mean = 0.0; M2 = 0.0; }
 };
 
-// 11 on-device features for OLED display and serial diagnostics.
-// The server re-extracts its own feature set from the raw arrays
-// in the /ingest payload -- this struct is for local use only.
+// On-device window features -- OLED display and serial only.
+// main.py re-extracts its own feature set from the raw arrays.
 struct WindowFeatures {
   float mean_HR      = 0.0f;
   float mean_RR      = 0.0f;
@@ -292,7 +293,6 @@ struct WindowFeatures {
   float std_temp     = 0.0f;
   float mean_acc_mag = 0.0f;
   float std_acc_mag  = 0.0f;
-
   uint16_t rr_count   = 0;
   uint8_t  br_count   = 0;
   uint32_t temp_count = 0;
@@ -322,7 +322,6 @@ struct RespirationData {
   float acComponent  = 0.0f;
   float rateInstant  = 0.0f;
   int   rateAvg      = 0;
-
   float rates[Config::RESP_RATE_SIZE] = {0.0f};
   byte  rateSpot       = 0;
   byte  validBreaths   = 0;
@@ -332,11 +331,20 @@ struct RespirationData {
 
 // =============================================================
 //  RAW SENSOR BUFFERS
-//  Populated during each 60-second window, then serialised into
-//  the /ingest JSON payload. The server's scipy/NeuroKit2
-//  pipeline runs gravity removal, peak extraction, and
-//  respiration cleaning on these arrays directly.
+//  Populated across the 60-second window, then flushed into the
+//  JSON payload for POST /ingest.
+//
+//  Field name mapping (firmware → main.py Pydantic model):
+//    ecgRawBuf    → ecg        (raw ADC waveform, 200 Hz)
+//    accelRawBuf  → acc_x/y/z  (BMI160 raw counts, ~6.67 Hz)
+//    strainRawBuf → resp        (strain gauge ADC, ~6.67 Hz)
+//    tempRawBuf   → temp        (DS18B20 deg C, ~0.5 Hz)
 // =============================================================
+
+struct ECGRawBuf {
+  uint16_t values[Config::ECG_RAW_BUF_SIZE];
+  uint16_t count = 0;
+};
 
 struct AccelRawBuf {
   int16_t  x[Config::SLOW_BUF_SIZE];
@@ -360,7 +368,7 @@ struct SensorHealth {
   bool bmi160  = false;
   bool ds18b20 = false;
   bool wifi    = false;
-  bool server  = false;   // true after a successful /ingest POST
+  bool server  = false;
 };
 
 
@@ -375,28 +383,24 @@ RespirationData respData;
 StrainData      strainData;
 SensorHealth    health;
 
-// Feature accumulation buffers (reset after each 60-s upload).
 RRBuffer     rrBuf;
 BRBuffer     brBuf;
 WelfordState tempWelford;
 WelfordState accWelford;
 
-// Raw sensor buffers for the /ingest payload.
+ECGRawBuf    ecgRawBuf;
 AccelRawBuf  accelRawBuf;
 StrainRawBuf strainRawBuf;
 TempRawBuf   tempRawBuf;
 
-// Last computed window features (shown on OLED page 0).
 WindowFeatures lastWindow;
 uint32_t       windowCount   = 0;
 uint32_t       missedUploads = 0;
 
-// Hardware drivers.
 OneWire           oneWire(Config::DS18B20_PIN);
 DallasTemperature tempSensor(&oneWire);
 Adafruit_SSD1306  display(Config::SCREEN_W, Config::SCREEN_H, &Wire, -1);
 
-// Scheduling timestamps.
 unsigned long lastOLED       = 0;
 unsigned long lastSerial     = 0;
 unsigned long lastSensor     = 0;
@@ -404,91 +408,72 @@ unsigned long lastEcgRead    = 0;
 unsigned long lastPageSwitch = 0;
 unsigned long windowStart    = 0;
 
-// Current OLED page (0 to 3).
 uint8_t currentOledPage = 0;
 
 
 // =============================================================
-//  UTILITY FUNCTIONS
+//  UTILITY
 // =============================================================
 
 bool getFormattedTime(char* buf, size_t len) {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 500)) return false;
-  strftime(buf, len, "%d/%m/%Y %H:%M:%S", &timeinfo);
-  return true;
-}
-
-bool getSafeTimestamp(char* buf, size_t len) {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 500)) return false;
-  strftime(buf, len, "%Y%m%d_%H%M%S", &timeinfo);
+  struct tm t;
+  if (!getLocalTime(&t, 500)) return false;
+  strftime(buf, len, "%d/%m/%Y %H:%M:%S", &t);
   return true;
 }
 
 String getShortTime() {
-  struct tm timeinfo;
+  struct tm t;
   char buf[10];
-  if (!getLocalTime(&timeinfo, 200)) return "--:--";
-  strftime(buf, sizeof(buf), "%H:%M:%S", &timeinfo);
+  if (!getLocalTime(&t, 200)) return "--:--";
+  strftime(buf, sizeof(buf), "%H:%M:%S", &t);
   return String(buf);
 }
 
 
 // =============================================================
-//  HRV FEATURE COMPUTATION (on-device, display use only)
-//  All formulas verified against NeuroKit2 hrv_time() output.
+//  HRV (on-device, display use only)
 // =============================================================
 
 HRVFeatures computeHRV(const RRBuffer& buf) {
   HRVFeatures f;
   f.n_rr = buf.count;
   if (buf.count < Config::MIN_VALID_RR) { f.valid = false; return f; }
-
   double sum = 0.0;
-  for (uint16_t i = 0; i < buf.count; i++) sum += (double)buf.intervals[i];
-  f.mean_RR = (float)(sum / (double)buf.count);
+  for (uint16_t i = 0; i < buf.count; i++) sum += buf.intervals[i];
+  f.mean_RR = (float)(sum / buf.count);
   f.mean_HR = (f.mean_RR > 0.0f) ? (60000.0f / f.mean_RR) : 0.0f;
-
-  // SDNN = population std dev of all RR intervals.
   double sq = 0.0;
   for (uint16_t i = 0; i < buf.count; i++) {
-    double d = (double)buf.intervals[i] - (double)f.mean_RR;
+    double d = buf.intervals[i] - f.mean_RR;
     sq += d * d;
   }
-  f.SDNN = (float)sqrt(sq / (double)(buf.count - 1));
-
-  // RMSSD and pNN50 require at least 2 intervals.
+  f.SDNN = (float)sqrt(sq / (buf.count - 1));
   if (buf.count >= 2) {
-    double   rmssd_sum = 0.0;
-    uint16_t above50   = 0;
-    uint16_t ndiffs    = buf.count - 1;
+    double rmssd_sum = 0.0; uint16_t above50 = 0;
+    uint16_t nd = buf.count - 1;
     for (uint16_t i = 1; i < buf.count; i++) {
-      float diff = buf.intervals[i] - buf.intervals[i-1];
-      rmssd_sum += (double)(diff * diff);
-      if (fabsf(diff) > 50.0f) above50++;
+      float d = buf.intervals[i] - buf.intervals[i-1];
+      rmssd_sum += d * d;
+      if (fabsf(d) > 50.0f) above50++;
     }
-    f.RMSSD = (float)sqrt(rmssd_sum / (double)ndiffs);
-    f.pNN50 = (float)above50 / (float)ndiffs * 100.0f;
+    f.RMSSD = (float)sqrt(rmssd_sum / nd);
+    f.pNN50 = (float)above50 / (float)nd * 100.0f;
   }
-
   f.valid = true;
   return f;
 }
 
-void computeBRStats(const BRBuffer& buf, float& mean_BR, float& std_BR) {
-  mean_BR = 0.0f; std_BR = 0.0f;
-  if (buf.count == 0) return;
+void computeBRStats(const BRBuffer& buf, float& m, float& s) {
+  m = 0.0f; s = 0.0f;
+  if (!buf.count) return;
   double sum = 0.0;
-  for (uint8_t i = 0; i < buf.count; i++) sum += (double)buf.rates[i];
-  mean_BR = (float)(sum / (double)buf.count);
+  for (uint8_t i = 0; i < buf.count; i++) sum += buf.rates[i];
+  m = (float)(sum / buf.count);
   if (buf.count < 2) return;
   double sq = 0.0;
-  for (uint8_t i = 0; i < buf.count; i++) {
-    double d = (double)buf.rates[i] - (double)mean_BR;
-    sq += d * d;
-  }
-  std_BR = (float)sqrt(sq / (double)(buf.count - 1));
+  for (uint8_t i = 0; i < buf.count; i++) { double d = buf.rates[i]-m; sq += d*d; }
+  s = (float)sqrt(sq / (buf.count - 1));
 }
 
 
@@ -497,43 +482,33 @@ void computeBRStats(const BRBuffer& buf, float& mean_BR, float& std_BR) {
 // =============================================================
 
 void connectWiFi() {
-  Serial.printf("[WiFi] Connecting to: %s\n", Config::SSID);
+  Serial.printf("[WiFi] Connecting to %s\n", Config::SSID);
   WiFi.mode(WIFI_STA);
   WiFi.begin(Config::SSID, Config::PASSWORD);
   uint8_t retries = 0;
   while (WiFi.status() != WL_CONNECTED && retries < 30) {
-    delay(500);
-    Serial.print(".");
-    retries++;
+    delay(500); Serial.print("."); retries++;
     esp_task_wdt_reset();
   }
   health.wifi = (WiFi.status() == WL_CONNECTED);
-  if (health.wifi) {
-    Serial.printf("\n[WiFi] Connected. IP: %s  RSSI: %d dBm\n",
+  if (health.wifi)
+    Serial.printf("\n[WiFi] Connected  IP:%s  RSSI:%d dBm\n",
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  } else {
+  else
     Serial.println("\n[WiFi] FAILED -- offline mode.");
-  }
 }
 
 void ensureWiFi() {
-  if (WiFi.status() != WL_CONNECTED) {
-    health.wifi = false;
-    connectWiFi();
-  }
+  if (WiFi.status() != WL_CONNECTED) { health.wifi = false; connectWiFi(); }
 }
 
 
 // =============================================================
 //  BUFFER RESET
-//  Called at the end of every 60-second window regardless of
-//  whether the upload succeeded, so the next window always
-//  starts with fresh accumulators.
-//  rrBuf.runMean is intentionally NOT reset here -- the ectopic
-//  filter needs a valid seed at the start of the next window.
 // =============================================================
 
 void resetWindowBuffers() {
+  ecgRawBuf.count    = 0;
   rrBuf.count        = 0;
   brBuf.count        = 0;
   accelRawBuf.count  = 0;
@@ -541,88 +516,76 @@ void resetWindowBuffers() {
   tempRawBuf.count   = 0;
   tempWelford.reset();
   accWelford.reset();
+  // rrBuf.runMean intentionally kept -- seeds the ectopic filter.
 }
 
 
 // =============================================================
-//  /ingest PAYLOAD BUILDER
+//  PAYLOAD BUILDER
 //
-//  Serialises all accumulated raw sensor arrays into a single
-//  JSON string ready for the HF FastAPI /ingest endpoint.
+//  Field names match RawSensorPayload in main.py exactly.
+//  Estimated output: 69-73 KB for a full 60-second window.
 //
-//  Estimated output size: 10-14 KB for a full 60-second window.
-//  s.reserve(16000) pre-allocates one contiguous heap block to
-//  prevent repeated reallocations during string concatenation.
-//
-//  The F() macro stores string literals in flash memory,
-//  saving SRAM during construction.
+//  SAMPLING RATE NOTE: sampling_rate = 200 (the ECG rate).
+//  main.py uses this single value for ALL signals. The acc and
+//  resp channels are at ~6.67 Hz, so their server-side
+//  processing (Butterworth HP, nk.rsp_rate) will use the wrong
+//  fs. Fix this in main.py by adding slow_sample_hz. See header.
 // =============================================================
 
-String buildIngestPayload(const char* ts) {
+String buildIngestPayload() {
   String s;
-  s.reserve(16000);
+  s.reserve(75000);  // Pre-allocate; avoids realloc during concat.
 
   s  = F("{\"user_id\":\"");
   s += Config::USER_ID;
-  s += F("\",\"window_ts\":\"");
-  s += ts;
-  s += F("\",\"fw_version\":\"");
-  s += Config::FW_VERSION;
-  s += F("\",\"ecg_sample_hz\":");
-  s += (uint32_t)(1000UL / Config::ECG_SAMPLE_INTERVAL);
-  s += F(",\"slow_sample_hz\":");
-  s += String(1000.0f / (float)Config::SENSOR_SLOW_MS, 2);
-  s += F(",\"leads_on\":");
-  s += hrData.leadsConnected ? F("true") : F("false");
+  s += F("\",\"sampling_rate\":");
+  s += (uint32_t)(1000UL / Config::ECG_SAMPLE_INTERVAL);  // 200
 
-  // RR intervals in ms (pre-extracted by on-device R-peak detector).
-  // The server can pass these directly to nk.hrv_time() to compute
-  // HRV features without needing the raw ECG waveform.
-  s += F(",\"rr_ms\":[");
-  for (uint16_t i = 0; i < rrBuf.count; i++) {
+  // ECG raw waveform (main.py field: ecg)
+  // nk.ecg_clean() + nk.ecg_peaks() run on this array.
+  s += F(",\"ecg\":[");
+  for (uint16_t i = 0; i < ecgRawBuf.count; i++) {
     if (i) s += ',';
-    s += String(rrBuf.intervals[i], 1);
+    s += ecgRawBuf.values[i];
   }
   s += ']';
 
-  // BMI160 raw accelerometer counts (16384 LSB per g at +/-2g).
-  s += F(",\"accel_x\":[");
-  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
-    if (i) s += ',';
-    s += accelRawBuf.x[i];
-  }
-  s += ']';
-
-  s += F(",\"accel_y\":[");
-  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
-    if (i) s += ',';
-    s += accelRawBuf.y[i];
-  }
-  s += ']';
-
-  s += F(",\"accel_z\":[");
-  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
-    if (i) s += ',';
-    s += accelRawBuf.z[i];
-  }
-  s += ']';
-
-  // BF350 strain gauge ADC readings (12-bit, 0-4095).
-  // 8-sample average per poll to reduce electrical noise.
-  s += F(",\"strain_raw\":[");
+  // Respiration via strain gauge (main.py field: resp)
+  s += F(",\"resp\":[");
   for (uint16_t i = 0; i < strainRawBuf.count; i++) {
     if (i) s += ',';
     s += strainRawBuf.values[i];
   }
   s += ']';
 
-  // DS18B20 skin temperature samples (deg C).
-  // Only physiologically plausible skin readings (28-38 C)
-  // are stored, matching the filter applied in tempWelford.
-  s += F(",\"temp_c\":[");
+  // Skin temperature (main.py field: temp)
+  s += F(",\"temp\":[");
   for (uint8_t i = 0; i < tempRawBuf.count; i++) {
     if (i) s += ',';
     s += String(tempRawBuf.values[i], 2);
+  }
+  s += ']';
+
+  // BMI160 accelerometer (main.py fields: acc_x, acc_y, acc_z)
+  s += F(",\"acc_x\":[");
+  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
+    if (i) s += ',';
+    s += accelRawBuf.x[i];
+  }
+  s += ']';
+
+  s += F(",\"acc_y\":[");
+  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
+    if (i) s += ',';
+    s += accelRawBuf.y[i];
+  }
+  s += ']';
+
+  s += F(",\"acc_z\":[");
+  for (uint16_t i = 0; i < accelRawBuf.count; i++) {
+    if (i) s += ',';
+    s += accelRawBuf.z[i];
   }
   s += F("]}");
 
@@ -633,22 +596,22 @@ String buildIngestPayload(const char* ts) {
 // =============================================================
 //  HTTPS POST TO /ingest
 //
-//  Creates a fresh WiFiClientSecure per upload. This avoids
-//  holding TLS context in memory between the 60-second windows.
-//
-//  esp_task_wdt_reset() is called before and after the blocking
-//  POST call because the HTTPS handshake + transfer can take
-//  up to HTTPS_TIMEOUT_MS (15 s), which is close to the default
-//  WDT timeout. WDT_TIMEOUT_SEC is set to 40 s to cover this.
+//  TLS verification uses ISRG Root X1 (setCACert).
+//  If HF_CA_CERT is still the placeholder, falls back to
+//  insecure mode with a serial warning.
 // =============================================================
 
 bool postToServer(const String& payload) {
   WiFiClientSecure secureClient;
 
-  // Dev mode: skips TLS certificate verification.
-  // Replace with secureClient.setCACert(isrg_root_x1_pem)
-  // before deploying to production.
-  secureClient.setInsecure();
+  if (certIsLoaded()) {
+    secureClient.setCACert(HF_CA_CERT);
+    Serial.println(F("[TLS] Using ISRG Root X1 certificate."));
+  } else {
+    secureClient.setInsecure();
+    Serial.println(F("[TLS] WARNING: CA cert not set -- insecure mode. "
+                     "Fill in HF_CA_CERT before production deployment."));
+  }
 
   HTTPClient https;
   String url = String(F("https://")) + Config::HF_HOST + F("/ingest");
@@ -670,15 +633,12 @@ bool postToServer(const String& payload) {
     Serial.printf("[HF] POST -> HTTP %d\n", code);
     ok = (code >= 200 && code < 300);
     if (!ok) {
-      // Log the server error body to help debug Pydantic
-      // validation failures or server-side exceptions.
-      String resp = https.getString();
-      if (resp.length() > 0)
-        Serial.printf("[HF] Server response: %s\n", resp.c_str());
+      String body = https.getString();
+      if (body.length())
+        Serial.printf("[HF] Server: %s\n", body.c_str());
     }
   } else {
-    Serial.printf("[HF] POST failed: %s\n",
-                  https.errorToString(code).c_str());
+    Serial.printf("[HF] Error: %s\n", https.errorToString(code).c_str());
   }
 
   https.end();
@@ -688,15 +648,13 @@ bool postToServer(const String& payload) {
 
 
 // =============================================================
-//  60-SECOND WINDOW: COMPUTE FEATURES + UPLOAD
+//  60-SECOND WINDOW: COMPUTE + UPLOAD
 // =============================================================
 
 void uploadWindowFeatures() {
-  char ts[32], safets[24];
-  if (!getFormattedTime(ts, sizeof(ts)))       strcpy(ts, "unknown");
-  if (!getSafeTimestamp(safets, sizeof(safets))) strcpy(safets, "unknown");
+  char ts[32];
+  if (!getFormattedTime(ts, sizeof(ts))) strcpy(ts, "unknown");
 
-  // Compute on-device features for OLED display and serial only.
   HRVFeatures hrv = computeHRV(rrBuf);
   float mean_BR = 0.0f, std_BR = 0.0f;
   computeBRStats(brBuf, mean_BR, std_BR);
@@ -718,51 +676,43 @@ void uploadWindowFeatures() {
   wf.temp_count   = tempWelford.n;
   wf.acc_count    = accWelford.n;
   wf.hrv_valid    = hrv.valid;
-
   lastWindow = wf;
   windowCount++;
 
   Serial.printf(
-    "[Window #%lu] valid=%s RR_n=%d HR=%.1f SDNN=%.1f RMSSD=%.1f pNN50=%.1f%% "
-    "BR=%.1f+/-%.1f Temp=%.2f+/-%.3f AccMag=%.3f+/-%.3f\n"
-    "             Raw buffers: accel=%d  strain=%d  temp=%d\n",
+    "[Window #%lu] valid=%s RR_n=%d HR=%.1f SDNN=%.1f RMSSD=%.1f pNN50=%.1f%%\n"
+    "             BR=%.1f+/-%.1f  Temp=%.2f+/-%.3f  AccMag=%.3f+/-%.3f\n"
+    "             Raw: ecg=%d  resp=%d  temp=%d  acc=%d\n",
     windowCount, wf.hrv_valid ? "YES" : "NO",
     wf.rr_count, wf.mean_HR, wf.SDNN, wf.RMSSD, wf.pNN50,
     wf.mean_BR, wf.std_BR,
     wf.mean_temp, wf.std_temp,
     wf.mean_acc_mag, wf.std_acc_mag,
-    accelRawBuf.count, strainRawBuf.count, tempRawBuf.count
+    ecgRawBuf.count, strainRawBuf.count, tempRawBuf.count, accelRawBuf.count
   );
 
-  // Attempt HTTPS upload.
   ensureWiFi();
   if (!health.wifi) {
-    Serial.println(F("[HF] Upload skipped -- no WiFi."));
+    Serial.println(F("[HF] Skipped -- no WiFi."));
     missedUploads++;
     resetWindowBuffers();
     return;
   }
 
-  uint32_t heapFree = ESP.getFreeHeap();
-  if (heapFree < Config::MIN_HEAP_FOR_UPLOAD) {
-    Serial.printf("[HF] Upload skipped -- heap too low (%lu B).\n",
-                  (unsigned long)heapFree);
+  uint32_t heap = ESP.getFreeHeap();
+  if (heap < Config::MIN_HEAP_FOR_UPLOAD) {
+    Serial.printf("[HF] Skipped -- heap too low (%lu B).\n", (unsigned long)heap);
     missedUploads++;
     resetWindowBuffers();
     return;
   }
 
-  Serial.printf("[HF] Building payload (heap free: %lu B)...\n",
-                (unsigned long)heapFree);
-  String payload = buildIngestPayload(safets);
-  Serial.printf("[HF] Payload: %u B  Posting to %s\n",
-                payload.length(), Config::HF_HOST);
+  Serial.printf("[HF] Building payload (heap: %lu B)...\n", (unsigned long)heap);
+  String payload = buildIngestPayload();
+  Serial.printf("[HF] Payload: %u B  -> %s\n", payload.length(), Config::HF_HOST);
 
   bool ok = postToServer(payload);
-
-  // Explicitly release the heap held by the payload String before
-  // the function returns, since the next window starts immediately.
-  payload = String();
+  payload = String();  // Release heap immediately.
 
   if (ok) {
     Serial.printf("[HF] Window #%lu OK  [%s]\n", windowCount, ts);
@@ -794,9 +744,9 @@ void initAD8232() {
   Serial.println(F("OK (200 Hz, ectopic filter active)"));
 }
 
-// Called every 5 ms (200 Hz) from the main loop.
-// Detects R-peaks, applies the ectopic beat filter, and stores
-// valid RR intervals in rrBuf for the 60-second window.
+// Called every 5 ms (200 Hz).
+// Every raw ADC sample is stored in ecgRawBuf regardless of peak
+// detection status -- main.py needs the full waveform.
 void updateHeartRate() {
   if (!health.ad8232) return;
 
@@ -810,32 +760,29 @@ void updateHeartRate() {
   if (now - lastEcgRead < Config::ECG_SAMPLE_INTERVAL) return;
   lastEcgRead = now;
 
-  bool loPlus  = digitalRead(Config::LO_PLUS);
-  bool loMinus = digitalRead(Config::LO_MINUS);
-  bool connected = !(loPlus || loMinus);
-
+  bool connected = !(digitalRead(Config::LO_PLUS) || digitalRead(Config::LO_MINUS));
   if (!connected) {
     if (hrData.leadsConnected) {
-      // Leads just disconnected: reset ectopic filter seed.
-      rrBuf.runMean           = 700.0f;
+      rrBuf.runMean = 700.0f;
       hrData.leadsConnectedAt = 0;
     }
     hrData.leadsConnected = false;
     return;
   }
-
   if (!hrData.leadsConnected) {
-    // Leads just reconnected: start the settle timer.
     hrData.leadsConnectedAt = now;
     hrData.leadsConnected   = true;
   }
 
-  // Dummy read reduces ADC sampling glitches on ESP32-C3.
-  analogRead(Config::ECG_PIN);
+  analogRead(Config::ECG_PIN);  // Dummy read -- reduces ADC glitch on ESP32-C3.
   int raw = analogRead(Config::ECG_PIN);
   hrData.ecgValue = raw;
 
-  // Moving-average noise filter.
+  // Store every sample for the /ingest payload (before settle check).
+  if (ecgRawBuf.count < Config::ECG_RAW_BUF_SIZE)
+    ecgRawBuf.values[ecgRawBuf.count++] = (uint16_t)raw;
+
+  // Moving-average noise filter (display BPM only).
   history[histIdx] = raw;
   histIdx = (histIdx + 1) % Config::ECG_FILTER_SIZE;
   int sum = 0;
@@ -849,36 +796,23 @@ void updateHeartRate() {
   if (hrData.ecgSmoothed > sigMax) sigMax = hrData.ecgSmoothed;
   if (hrData.ecgSmoothed < sigMin) sigMin = hrData.ecgSmoothed;
 
-  int range  = sigMax - sigMin;
-  int thresh = sigMin + (int)(range * Config::ECG_THRESH_RATIO);
-  int hyst   = (int)(range * Config::ECG_HYST_RATIO);
+  int thresh = sigMin + (int)((sigMax - sigMin) * Config::ECG_THRESH_RATIO);
+  int hyst   = (int)((sigMax - sigMin) * Config::ECG_HYST_RATIO);
   hrData.adaptThresh = thresh;
 
   // R-peak detection with hysteresis.
   if (hrData.ecgSmoothed > thresh && !aboveThreshold) {
     aboveThreshold = true;
-
     bool settled = (now - hrData.leadsConnectedAt) > Config::ECG_SETTLE_MS;
-
     if (settled && hrData.lastBeat != 0) {
       float dt_ms = (float)(now - hrData.lastBeat);
-
       if (dt_ms >= Config::RR_MIN_MS && dt_ms <= Config::RR_MAX_MS) {
-
-        // Ectopic beat filter: skip filter for the first 5 beats
-        // so runMean can establish a baseline from real data.
-        float deviation  = fabsf(dt_ms - rrBuf.runMean) / rrBuf.runMean;
-        bool  is_ectopic = (rrBuf.count >= 5) &&
-                           (deviation > Config::RR_ECTOPIC_THRESH);
-
-        if (!is_ectopic) {
+        float dev = fabsf(dt_ms - rrBuf.runMean) / rrBuf.runMean;
+        bool ectopic = (rrBuf.count >= 5) && (dev > Config::RR_ECTOPIC_THRESH);
+        if (!ectopic) {
           if (rrBuf.count < Config::RR_BUFFER_SIZE)
             rrBuf.intervals[rrBuf.count++] = dt_ms;
-
-          // EMA update (alpha = 0.1).
           rrBuf.runMean = rrBuf.runMean * 0.9f + dt_ms * 0.1f;
-
-          // Update display BPM ring buffer.
           float bpm = 60000.0f / dt_ms;
           hrData.bpm = bpm;
           hrData.rates[hrData.rateSpot++] = bpm;
@@ -886,16 +820,11 @@ void updateHeartRate() {
           if (hrData.validBeats < Config::BPM_RATE_SIZE) hrData.validBeats++;
           float s = 0.0f;
           for (int i = 0; i < hrData.validBeats; i++) s += hrData.rates[i];
-          hrData.bpmAvg = (int)(s / (float)hrData.validBeats);
+          hrData.bpmAvg = (int)(s / hrData.validBeats);
         }
       }
     }
-
-    // Always update lastBeat -- even for ectopic beats -- so
-    // the next RR interval is measured from this peak and not
-    // the one before it. Skipping this would inflate the next RR.
     hrData.lastBeat = now;
-
   } else if (hrData.ecgSmoothed < thresh - hyst) {
     aboveThreshold = false;
   }
@@ -913,29 +842,19 @@ void initBMI160() {
     health.bmi160 = false;
     return;
   }
-  // Default +/-2g range kept: appropriate for torso motion and
-  // matches WESAD dataset accelerometer units.
   health.bmi160 = true;
-  Serial.println(F("OK (+/-2g, step counting disabled)"));
+  Serial.println(F("OK (+/-2g)"));
 }
 
-// Called every 150 ms. Reads raw accelerometer and gyroscope,
-// computes vector magnitude for the Welford display stats, and
-// stores raw counts in accelRawBuf for the /ingest payload.
 void updateIMU() {
   if (!health.bmi160) return;
-
   BMI160.readAccelerometer(imuData.ax, imuData.ay, imuData.az);
   BMI160.readGyro(imuData.gx, imuData.gy, imuData.gz);
-
-  // Convert to g for the Welford magnitude statistic.
   float ax_g = imuData.ax / Config::BMI160_ACC_SCALE_G;
   float ay_g = imuData.ay / Config::BMI160_ACC_SCALE_G;
   float az_g = imuData.az / Config::BMI160_ACC_SCALE_G;
   imuData.acc_mag_g = sqrtf(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
   accWelford.update(imuData.acc_mag_g);
-
-  // Store raw LSB counts for the server's gravity removal filter.
   if (accelRawBuf.count < Config::SLOW_BUF_SIZE) {
     accelRawBuf.x[accelRawBuf.count] = (int16_t)imuData.ax;
     accelRawBuf.y[accelRawBuf.count] = (int16_t)imuData.ay;
@@ -954,46 +873,32 @@ void initDS18B20() {
   tempSensor.begin();
   uint8_t n = tempSensor.getDeviceCount();
   health.ds18b20 = (n > 0);
-  Serial.printf("%s (found %d device[s])\n",
-                health.ds18b20 ? "OK" : "FAILED", n);
+  Serial.printf("%s (%d device[s])\n", health.ds18b20 ? "OK" : "FAILED", n);
   if (health.ds18b20) {
-    tempSensor.setResolution(12);           // 0.0625 deg C per step
-    tempSensor.setWaitForConversion(false); // Non-blocking
+    tempSensor.setResolution(12);
+    tempSensor.setWaitForConversion(false);
   }
 }
 
-// Called every 150 ms, internally throttled to a 2-second cycle.
-// Two-step non-blocking approach:
-//   Step A (every 2 s): send the conversion command.
-//   Step B (800 ms later): read the result.
 void updateTemperature() {
   if (!health.ds18b20) return;
-
   static unsigned long lastReq   = 0;
   static bool          requested = false;
   unsigned long        now       = millis();
 
   if (!requested && (now - lastReq >= 2000)) {
     tempSensor.requestTemperatures();
-    requested = true;
-    lastReq   = now;
+    requested = true; lastReq = now;
   }
-
   if (requested && (now - lastReq >= 800)) {
     float c = tempSensor.getTempCByIndex(0);
-
     if (c == DEVICE_DISCONNECTED_C || c < -55.0f || c > 125.0f) {
-      tempData.valid   = false;
-      tempData.celsius = 0.0f;
+      tempData.valid = false; tempData.celsius = 0.0f;
     } else {
       tempData.celsius    = c;
       tempData.fahrenheit = tempSensor.toFahrenheit(c);
       tempData.valid      = true;
-
-      // Only store physiologically plausible skin temperatures
-      // (normal skin surface range: 28-38 deg C).
-      // Values outside this range indicate the strap is loose
-      // or the sensor is not in contact with skin.
+      // Only store physiologically plausible skin values (28-38 C).
       if (c >= 28.0f && c <= 38.0f) {
         tempWelford.update(c);
         if (tempRawBuf.count < Config::TEMP_BUF_SIZE)
@@ -1007,12 +912,7 @@ void updateTemperature() {
 
 // =============================================================
 //  SENSOR: BF350 Strain Gauge (Respiration)
-//
-//  The strain gauge stretches during chest expansion, producing
-//  a slow voltage wave. Three processing stages extract BR:
-//    Stage 1 -- moving-average LP filter removes electrical noise
-//    Stage 2 -- DC removal strips the resting-tension offset
-//    Stage 3 -- rising zero-crossing detects each breath
+//  Three-stage pipeline: LP filter → DC removal → zero-crossing.
 // =============================================================
 
 void updateStrain() {
@@ -1026,11 +926,9 @@ void updateStrain() {
   strainData.raw     = adcAvg;
   strainData.voltage = (adcAvg / Config::ADC_MAX) * Config::ADC_REF_V;
 
-  // Store the 8-sample average for the /ingest payload.
   if (strainRawBuf.count < Config::SLOW_BUF_SIZE)
     strainRawBuf.values[strainRawBuf.count++] = adcAvg;
 
-  // Stage 1: Moving-average LP filter.
   static float   maBuffer[Config::RESP_FILTER_SIZE] = {0};
   static uint8_t maIdx = 0;
   maBuffer[maIdx] = (float)adcAvg;
@@ -1039,7 +937,6 @@ void updateStrain() {
   for (uint8_t i = 0; i < Config::RESP_FILTER_SIZE; i++) maSum += maBuffer[i];
   respData.filteredRaw = maSum / Config::RESP_FILTER_SIZE;
 
-  // Stage 2: DC removal.
   static float   dcBuffer[Config::RESP_DC_SIZE] = {0};
   static uint8_t dcIdx = 0;
   dcBuffer[dcIdx] = respData.filteredRaw;
@@ -1048,31 +945,29 @@ void updateStrain() {
   for (uint8_t i = 0; i < Config::RESP_DC_SIZE; i++) dcSum += dcBuffer[i];
   respData.acComponent = respData.filteredRaw - (dcSum / Config::RESP_DC_SIZE);
 
-  // Stage 3: Rising zero-crossing breath detection.
-  static float prevAC          = 0.0f;
+  static float prevAC = 0.0f;
   static long  lastBreathLocal = 0;
   respData.breathDetected = false;
-
   unsigned long now = millis();
-  bool zeroCrossUp  = (prevAC < 0.0f && respData.acComponent >= 0.0f);
 
-  if (zeroCrossUp && (now - lastBreathLocal > Config::RESP_MIN_INTERVAL)) {
+  if (prevAC < 0.0f && respData.acComponent >= 0.0f &&
+      (now - lastBreathLocal > Config::RESP_MIN_INTERVAL)) {
     if (lastBreathLocal != 0) {
-      float instRate = 60.0f / ((now - lastBreathLocal) / 1000.0f);
-      if (instRate >= Config::RESP_MIN && instRate <= Config::RESP_MAX) {
-        respData.rateInstant = instRate;
-        respData.rates[respData.rateSpot++] = instRate;
+      float rate = 60.0f / ((now - lastBreathLocal) / 1000.0f);
+      if (rate >= Config::RESP_MIN && rate <= Config::RESP_MAX) {
+        respData.rateInstant = rate;
+        respData.rates[respData.rateSpot++] = rate;
         respData.rateSpot %= Config::RESP_RATE_SIZE;
         if (respData.validBreaths < Config::RESP_RATE_SIZE) respData.validBreaths++;
-        float rSum = 0;
-        for (byte i = 0; i < respData.validBreaths; i++) rSum += respData.rates[i];
-        respData.rateAvg        = (int)(rSum / (float)respData.validBreaths);
+        float rs = 0;
+        for (byte i = 0; i < respData.validBreaths; i++) rs += respData.rates[i];
+        respData.rateAvg = (int)(rs / respData.validBreaths);
         respData.breathDetected = true;
         if (brBuf.count < Config::BR_BUFFER_SIZE)
-          brBuf.rates[brBuf.count++] = instRate;
+          brBuf.rates[brBuf.count++] = rate;
       }
     }
-    lastBreathLocal     = now;
+    lastBreathLocal = now;
     respData.lastBreath = now;
   }
   prevAC = respData.acComponent;
@@ -1086,62 +981,46 @@ void updateStrain() {
 void initOLED() {
   Serial.print(F("[OLED] Initializing... "));
   if (!display.begin(SSD1306_SWITCHCAPVCC, Config::OLED_ADDR)) {
-    Serial.println(F("FAILED at 0x3C"));
-    return;
+    Serial.println(F("FAILED at 0x3C")); return;
   }
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.cp437(true);
-  display.setTextSize(1);
-  display.setCursor(4,  8);  display.print(F("R26-DS-012 RESEARCH"));
-  display.setCursor(8,  22); display.print(F("Anxiety Detection"));
-  display.setCursor(4,  36); display.print(F("User: "));
-  display.print(Config::USER_ID);
-  display.setCursor(4,  50); display.print(F("Initializing..."));
+  display.setTextColor(SSD1306_WHITE); display.cp437(true); display.setTextSize(1);
+  display.setCursor(4, 8);  display.print(F("R26-DS-012 RESEARCH"));
+  display.setCursor(8, 22); display.print(F("Anxiety Detection"));
+  display.setCursor(4, 36); display.print(F("User: ")); display.print(Config::USER_ID);
+  display.setCursor(4, 50); display.print(F("Initializing..."));
   display.drawRect(0, 0, 128, 64, SSD1306_WHITE);
   display.display();
   Serial.println(F("OK"));
 }
 
-// Page 0: ECG + HRV status.
 void drawOledPage0() {
   display.clearDisplay();
   display.fillRect(0, 0, 128, 12, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
-  display.setTextSize(1);
+  display.setTextColor(SSD1306_BLACK); display.setTextSize(1);
   display.setCursor(2, 2);  display.print(F("ECG + HRV"));
   display.setCursor(72, 2); display.print(getShortTime());
   display.setTextColor(SSD1306_WHITE);
-
   if (!hrData.leadsConnected) {
     display.setCursor(8, 22); display.print(F("Leads disconnected."));
     display.setCursor(8, 35); display.print(F("Attach electrodes."));
-    display.setCursor(8, 48); display.print(F("Check contact."));
-    display.display();
-    return;
+    display.display(); return;
   }
-
   bool settled = (millis() - hrData.leadsConnectedAt) >= Config::ECG_SETTLE_MS;
   if (!settled) {
-    unsigned long remain =
-      (Config::ECG_SETTLE_MS - (millis() - hrData.leadsConnectedAt)) / 1000UL + 1;
+    unsigned long r = (Config::ECG_SETTLE_MS-(millis()-hrData.leadsConnectedAt))/1000UL+1;
     display.setCursor(8, 22); display.print(F("Calibrating ECG..."));
-    display.setCursor(8, 35); display.printf("Ready in %lus", remain);
-    display.display();
-    return;
+    display.setCursor(8, 35); display.printf("Ready in %lus", r);
+    display.display(); return;
   }
-
-  display.setTextSize(3);
-  display.setCursor(0, 14);
-  display.print(hrData.bpmAvg);
+  display.setTextSize(3); display.setCursor(0, 14); display.print(hrData.bpmAvg);
   display.setTextSize(1);
   display.setCursor(56, 16); display.print(F("BPM avg"));
-  display.setCursor(56, 26); display.printf("RR buf:%d", rrBuf.count);
+  display.setCursor(56, 26); display.printf("ECG:%d", ecgRawBuf.count);
   display.setCursor(0, 44);
   if (lastWindow.hrv_valid) {
     display.printf("RMSSD:%.1f SDNN:%.1f", lastWindow.RMSSD, lastWindow.SDNN);
-    display.setCursor(0, 54);
-    display.printf("pNN50: %.1f%%", lastWindow.pNN50);
+    display.setCursor(0, 54); display.printf("pNN50: %.1f%%", lastWindow.pNN50);
   } else {
     display.print(F("HRV: collecting..."));
     display.setCursor(0, 54);
@@ -1150,99 +1029,74 @@ void drawOledPage0() {
   display.display();
 }
 
-// Page 1: Respiration.
 void drawOledPage1() {
   display.clearDisplay();
   display.fillRect(0, 0, 128, 12, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
-  display.setTextSize(1);
+  display.setTextColor(SSD1306_BLACK); display.setTextSize(1);
   display.setCursor(2, 2);  display.print(F("RESPIRATION"));
   display.setCursor(72, 2); display.print(getShortTime());
   display.setTextColor(SSD1306_WHITE);
-
-  display.setTextSize(3);
-  display.setCursor(0, 14);
+  display.setTextSize(3); display.setCursor(0, 14);
   if (respData.validBreaths > 0) display.print(respData.rateAvg);
   else                           display.print(F("--"));
   display.setTextSize(1);
   display.setCursor(56, 22); display.print(F("br/min"));
   display.setCursor(0, 44);
-  if (respData.rateInstant > 0)
-    display.printf("Inst: %.1f br/min", respData.rateInstant);
-  else
-    display.print(F("Calibrating..."));
+  if (respData.rateInstant > 0) display.printf("Inst: %.1f br/min", respData.rateInstant);
+  else                          display.print(F("Calibrating..."));
   display.setCursor(0, 54);
   if (lastWindow.mean_BR > 0.0f)
     display.printf("Avg:%.1f Std:%.1f", lastWindow.mean_BR, lastWindow.std_BR);
-
   display.drawLine(100, 63, 127, 63, SSD1306_WHITE);
   int barH = (int)constrain(respData.acComponent / 20.0f, -6.0f, 6.0f);
-  if (barH >= 0) display.fillRect(100, 63 - barH, 27, barH + 1, SSD1306_WHITE);
+  if (barH >= 0) display.fillRect(100, 63-barH, 27, barH+1, SSD1306_WHITE);
   else           display.fillRect(100, 63, 27, -barH, SSD1306_WHITE);
   if (respData.breathDetected) display.fillCircle(120, 56, 3, SSD1306_WHITE);
   display.display();
 }
 
-// Page 2: Temperature and accelerometer magnitude.
 void drawOledPage2() {
   display.clearDisplay();
   display.fillRect(0, 0, 128, 12, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
-  display.setTextSize(1);
+  display.setTextColor(SSD1306_BLACK); display.setTextSize(1);
   display.setCursor(2, 2);  display.print(F("TEMP + MOTION"));
   display.setCursor(72, 2); display.print(getShortTime());
   display.setTextColor(SSD1306_WHITE);
-
   display.setCursor(0, 15);
   if (tempData.valid) display.printf("Temp: %.2f C", tempData.celsius);
   else               display.print(F("Temp: -- sensor ERR"));
   if (lastWindow.mean_temp > 0.0f) {
     display.setCursor(0, 25);
-    display.printf("Avg:%.2fC Std:%.3f",
-                   lastWindow.mean_temp, lastWindow.std_temp);
+    display.printf("Avg:%.2fC Std:%.3f", lastWindow.mean_temp, lastWindow.std_temp);
   }
   display.setCursor(0, 37);
   display.printf("AccMag: %.3f g", imuData.acc_mag_g);
   if (lastWindow.mean_acc_mag > 0.0f) {
     display.setCursor(0, 47);
-    display.printf("Avg:%.3f Std:%.3f",
-                   lastWindow.mean_acc_mag, lastWindow.std_acc_mag);
+    display.printf("Avg:%.3f Std:%.3f", lastWindow.mean_acc_mag, lastWindow.std_acc_mag);
   }
   display.setCursor(0, 57);
-  display.printf("A:[%d,%d,%d]k",
-                 imuData.ax/1000, imuData.ay/1000, imuData.az/1000);
+  display.printf("A:[%d,%d,%d]k", imuData.ax/1000, imuData.ay/1000, imuData.az/1000);
   display.display();
 }
 
-// Page 3: System health and upload status.
 void drawOledPage3() {
   display.clearDisplay();
   display.fillRect(0, 0, 128, 12, SSD1306_WHITE);
-  display.setTextColor(SSD1306_BLACK);
-  display.setTextSize(1);
+  display.setTextColor(SSD1306_BLACK); display.setTextSize(1);
   display.setCursor(2, 2);  display.print(F("SYSTEM"));
   display.setCursor(72, 2); display.print(getShortTime());
   display.setTextColor(SSD1306_WHITE);
-
-  display.setCursor(0, 14);
-  display.printf("User: %s", Config::USER_ID);
-
-  display.setCursor(0, 23);
-  display.printf("Win: #%lu  RR: %d", windowCount, rrBuf.count);
-
-  display.setCursor(0, 33);
-  display.printf("Missed: %lu", missedUploads);
-
+  display.setCursor(0, 14); display.printf("User: %s", Config::USER_ID);
+  display.setCursor(0, 23); display.printf("Win:#%lu ECG:%d", windowCount, ecgRawBuf.count);
+  display.setCursor(0, 33); display.printf("Missed: %lu", missedUploads);
   display.setCursor(0, 43);
   display.printf("WiFi:%s Srv:%s %dkB",
     health.wifi   ? "Y" : "N",
     health.server ? "Y" : "N",
     ESP.getFreeHeap() / 1024);
-
   display.setCursor(0, 53);
-  display.printf("RSSI:%d  A:%d T:%d",
-    (int)WiFi.RSSI(), accelRawBuf.count, tempRawBuf.count);
-
+  display.printf("RSSI:%d TLS:%s", (int)WiFi.RSSI(), certIsLoaded() ? "ON" : "OFF");
   display.display();
 }
 
@@ -1265,36 +1119,31 @@ void updateOLED() {
 // =============================================================
 
 void printSerial() {
-  char ts[32];
-  getFormattedTime(ts, sizeof(ts));
+  char ts[32]; getFormattedTime(ts, sizeof(ts));
   bool settled = hrData.leadsConnected &&
-                 (millis() - hrData.leadsConnectedAt) >= Config::ECG_SETTLE_MS;
-
+                 (millis()-hrData.leadsConnectedAt) >= Config::ECG_SETTLE_MS;
   Serial.printf(
-    "[%s] User=%s Win=#%lu\n"
-    "  ECG  : BPM=%d(avg) %.1f(inst) leads=%s settled=%s thr=%d\n"
-    "  RRBUF: n=%d runMean=%.1f\n"
+    "[%s] User=%s  Win=#%lu  FW=%s\n"
+    "  ECG  : BPM=%d(avg) %.1f(inst) leads=%s settled=%s thr=%d ecg_n=%d\n"
     "  HRV  : HR=%.1f RR=%.1fms SDNN=%.1f RMSSD=%.1f pNN50=%.1f%% [valid=%s]\n"
-    "  RESP : avg=%d inst=%.1f BR_n=%d\n"
-    "  TEMP : %.2fC valid=%s temp_n=%lu\n"
-    "  ACC  : mag=%.3fg [%d,%d,%d] acc_n=%lu\n"
-    "  RAW  : accel=%d  strain=%d  temp=%d\n"
-    "  SYS  : WiFi=%s Srv=%s RSSI=%d Heap=%dkB Missed=%lu\n\n",
-    ts, Config::USER_ID, windowCount,
+    "  RESP : avg=%d inst=%.1f BR_n=%d resp_n=%d\n"
+    "  TEMP : %.2fC valid=%s temp_n=%d\n"
+    "  ACC  : mag=%.3fg [%d,%d,%d] acc_n=%d\n"
+    "  SYS  : WiFi=%s Srv=%s TLS=%s RSSI=%d Heap=%dkB Missed=%lu\n\n",
+    ts, Config::USER_ID, windowCount, Config::FW_VERSION,
     hrData.bpmAvg, hrData.bpm,
     hrData.leadsConnected ? "YES" : "NO",
-    settled          ? "YES" : "NO",
-    hrData.adaptThresh,
-    rrBuf.count, rrBuf.runMean,
+    settled ? "YES" : "NO",
+    hrData.adaptThresh, ecgRawBuf.count,
     lastWindow.mean_HR, lastWindow.mean_RR,
     lastWindow.SDNN, lastWindow.RMSSD, lastWindow.pNN50,
     lastWindow.hrv_valid ? "YES" : "NO",
-    respData.rateAvg, respData.rateInstant, brBuf.count,
-    tempData.celsius, tempData.valid ? "YES" : "NO", tempWelford.n,
-    imuData.acc_mag_g, imuData.ax, imuData.ay, imuData.az, accWelford.n,
-    accelRawBuf.count, strainRawBuf.count, tempRawBuf.count,
+    respData.rateAvg, respData.rateInstant, brBuf.count, strainRawBuf.count,
+    tempData.celsius, tempData.valid ? "YES" : "NO", tempRawBuf.count,
+    imuData.acc_mag_g, imuData.ax, imuData.ay, imuData.az, accelRawBuf.count,
     health.wifi   ? "Y" : "N",
     health.server ? "Y" : "N",
+    certIsLoaded() ? "Y" : "N",
     (int)WiFi.RSSI(), ESP.getFreeHeap() / 1024, missedUploads
   );
 }
@@ -1307,12 +1156,11 @@ void printSerial() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println(F("\n\n=== R26-DS-012 Anxiety Detection Firmware v2.0.0 ==="));
-  Serial.printf("User ID : %s\n", Config::USER_ID);
-  Serial.printf("HF Host : %s\n", Config::HF_HOST);
+  Serial.println(F("\n\n=== R26-DS-012 Anxiety Detection Firmware v2.1.0 ==="));
+  Serial.printf("User   : %s\n", Config::USER_ID);
+  Serial.printf("Host   : %s\n", Config::HF_HOST);
+  Serial.printf("TLS    : %s\n", certIsLoaded() ? "ISRG Root X1" : "INSECURE (cert not set)");
 
-  // WDT timeout raised to 40 s to cover the HTTPS_TIMEOUT_MS
-  // (15 s) plus TLS handshake overhead (~3-5 s).
   const esp_task_wdt_config_t wdt_cfg = {
     .timeout_ms     = Config::WDT_TIMEOUT_SEC * 1000,
     .idle_core_mask = 0,
@@ -1332,25 +1180,21 @@ void setup() {
 
   connectWiFi();
   if (health.wifi) {
-    configTime(Config::GMT_OFFSET_SEC, Config::DST_OFFSET_SEC,
-               Config::NTP_SERVER);
-    Serial.println(F("[NTP] Time sync started..."));
-    Serial.print(F("[NTP] Waiting"));
+    configTime(Config::GMT_OFFSET_SEC, Config::DST_OFFSET_SEC, Config::NTP_SERVER);
+    Serial.print(F("[NTP] Syncing"));
     for (uint8_t i = 0; i < 20; i++) {
       struct tm info;
       if (getLocalTime(&info, 500)) { Serial.println(F(" OK")); break; }
-      Serial.print(F("."));
-      esp_task_wdt_reset();
+      Serial.print('.'); esp_task_wdt_reset();
     }
   }
 
   resetWindowBuffers();
-  rrBuf.runMean = 700.0f;   // Seed ectopic filter at ~86 BPM
-
+  rrBuf.runMean  = 700.0f;
   windowStart    = millis();
   lastPageSwitch = millis();
 
-  Serial.println(F("[System] Ready -- entering data collection loop.\n"));
+  Serial.println(F("[System] Ready -- entering collection loop.\n"));
   esp_task_wdt_reset();
 }
 
@@ -1358,19 +1202,14 @@ void setup() {
 // =============================================================
 //  LOOP
 //
-//  Task schedule:
-//    Every 5 ms     ECG sample + R-peak detection (200 Hz)
-//    Every 150 ms   IMU + temperature + strain gauge
-//    Every 300 ms   OLED refresh
-//    Every 1000 ms  Serial telemetry
-//    Every 60 s     Raw payload POST to HF /ingest
+//  Every 5 ms     ECG sample + R-peak detection (200 Hz)
+//  Every 150 ms   IMU, temperature, strain gauge
+//  Every 300 ms   OLED refresh
+//  Every 1000 ms  Serial telemetry
+//  Every 60 s     POST raw payload to HF /ingest
 //
-//  No blocking delays anywhere in the loop.
-//  All tasks use non-blocking millis() scheduling.
-//
-//  windowStart is reset BEFORE uploadWindowFeatures() is called
-//  so the next window's accumulation begins immediately, even if
-//  the HTTPS POST takes several seconds to complete.
+//  windowStart is advanced before uploadWindowFeatures() so the
+//  next window accumulates data during the upload.
 // =============================================================
 
 void loop() {
@@ -1385,17 +1224,14 @@ void loop() {
     updateTemperature();
     updateStrain();
   }
-
   if (now - lastOLED >= Config::OLED_INTERVAL) {
     lastOLED = now;
     updateOLED();
   }
-
   if (now - lastSerial >= Config::SERIAL_INTERVAL) {
     lastSerial = now;
     printSerial();
   }
-
   if (now - windowStart >= Config::WINDOW_DURATION_MS) {
     windowStart = now;
     uploadWindowFeatures();
