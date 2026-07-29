@@ -146,13 +146,3 @@ The objective is to develop a complete wearable physiological monitoring
 platform capable of continuously acquiring physiological signals,
 extracting clinically relevant health metrics, and delivering processed
 information to a mobile application over Bluetooth Low Energy.
-
-------------------------------------------------------------------------
-
-## Author
-
-**Thamara Banneheka**
-
-Electrical & Electronic Engineer\
-University of Kelaniya -- M.Sc. Data Analytics\
-SLIIT -- B.Sc. (Hons.) Electrical & Electronic Engineering
