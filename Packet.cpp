@@ -44,6 +44,7 @@ String Packet::toCSV()
     csv += ",";
 
     csv += String(currentPacket.temperature.bodyTemperature, 2);
+    csv += "\n";
 
     return csv;
 }
