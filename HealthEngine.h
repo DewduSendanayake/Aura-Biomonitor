@@ -4,20 +4,23 @@
 #include <Arduino.h>
 
 #include "DataTypes.h"
+#include "QRSDetector.h"
+#include "HRVProcessor.h"
+#include "StatsWindow.h"
 
 struct HealthPacket
 {
     uint32_t timestamp;
-
-    uint16_t heartRate;
-
-    uint8_t respiration;
-
-    float bodyTemperature;
-
-    uint32_t steps;
-
-    bool moving;
+    float meanHR;
+    float meanRR;
+    float sdnn;
+    float rmssd;
+    float meanBR;
+    float stdBR;
+    float meanTemp;
+    float stdTemp;
+    float meanAccMag;
+    float stdAccMag;
 };
 
 class HealthEngine
@@ -45,8 +48,22 @@ private:
     uint32_t stepCounter;
 
     bool moving;
+    
+    QRSDetector qrs;
+    HRVProcessor hrv;
+    StatsWindow<float, 10> tempStats; // 10s window (1 Hz temp data)
+    StatsWindow<float, 100> accStats; // 1s window (100 Hz IMU data)
+
+    // Respiration tracking state
+    int32_t lp_z_sum;
+    int32_t lp_z_buffer[32];
+    int lp_z_ptr;
+    bool breathingIn;
+    uint32_t lastBreathTime;
+    StatsWindow<float, 5> brStats; // 5 breath window
 
     void detectMotion(const IMUData& imu);
+    void detectRespiration(const IMUData& imu, uint32_t timestamp);
 
 };
 
