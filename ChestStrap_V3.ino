@@ -197,6 +197,10 @@ void loop()
             sensorPacket.temperature,
             sensorPacket.timestamp);
 
+    sensorPacket.ecg.newData = false;
+    sensorPacket.imu.newData = false;
+    sensorPacket.temperature.newData = false;
+
     /************************************************
      * Serial Debug
      ************************************************/
