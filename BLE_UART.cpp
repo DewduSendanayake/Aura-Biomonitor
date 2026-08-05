@@ -99,7 +99,13 @@ void BLE_UART::send(const String& message)
     if(!deviceConnected)
         return;
 
-    txCharacteristic->setValue(message.c_str());
+    String msg = message;
+    if(!msg.endsWith("\n"))
+    {
+        msg += "\n";
+    }
+
+    txCharacteristic->setValue(msg.c_str());
 
     txCharacteristic->notify();
 }
