@@ -156,6 +156,7 @@ String HealthEngine::toCSV()
     csv += String(packet.meanAccMag, 2);
     csv += ",";
     csv += String(packet.stdAccMag, 2);
+    csv += "\n";
 
     return csv;
 }
