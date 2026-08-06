@@ -14,6 +14,8 @@ struct ECGData
 
     uint8_t status[3];
 
+    bool leadOff;       // true = electrodes not in contact with skin
+
     bool newData;
 };
 

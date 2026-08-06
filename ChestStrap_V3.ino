@@ -158,6 +158,11 @@ void loop()
             }
         }
     }
+    else
+    {
+        // ECG hardware not available — treat as lead-off
+        sensorPacket.ecg.leadOff = true;
+    }
 
     /************************************************
      * IMU

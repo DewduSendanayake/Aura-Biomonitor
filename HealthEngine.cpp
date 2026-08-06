@@ -1,4 +1,5 @@
 #include "HealthEngine.h"
+#include "Config.h"
 
 HealthEngine::HealthEngine()
 {
@@ -7,6 +8,9 @@ HealthEngine::HealthEngine()
     lastPacketTime = 0;
     stepCounter = 0;
     moving = false;
+
+    isWorn = false;
+    wasWorn = false;
     
     lp_z_sum = 0;
     lp_z_ptr = 0;
@@ -21,21 +25,37 @@ void HealthEngine::update(
     const TemperatureData& temp,
     uint32_t timestamp)
 {
-    // 1. Process ECG Data for QRS detection
-    if (ecg.newData) {
+    // -------------------------------------------------------
+    // 1. Determine isWorn status
+    //    - ECG lead-off must NOT be detected
+    //    - AND temperature must be at or above skin threshold
+    // -------------------------------------------------------
+
+    bool ecgContact = !ecg.leadOff;
+    bool tempOnBody = (temp.bodyTemperature >= SKIN_TEMP_THRESHOLD);
+
+    isWorn = ecgContact && tempOnBody;
+
+    // Edge detection: just came off body → reset HRV buffer
+    if (wasWorn && !isWorn) {
+        hrv.reset();
+    }
+    wasWorn = isWorn;
+
+    // -------------------------------------------------------
+    // 2. Process ECG Data for QRS detection (only when worn)
+    // -------------------------------------------------------
+
+    if (isWorn && ecg.newData) {
         if (qrs.processSample(ecg.ch1, timestamp)) {
             hrv.addRRInterval((float)qrs.getLastRR());
         }
-        
-        // Remove constness requirement conceptually by assuming newData is handled by caller,
-        // or we just process it. We will rely on the scheduler to not call this duplicate times,
-        // or we process the same sample (which is bad for DSP).
-        // Actually, we process it in `loop()` every iteration. 
-        // We MUST only process when newData is true. But `newData` is inside a const struct here.
-        // We will assume `ChestStrap_V3.ino` handles newData soon or we just use it if available.
     }
 
-    // 2. Process IMU Data
+    // -------------------------------------------------------
+    // 3. Process IMU Data (always — useful for diagnostics)
+    // -------------------------------------------------------
+
     if (imu.newData) {
         detectMotion(imu);
         detectRespiration(imu, timestamp);
@@ -44,40 +64,55 @@ void HealthEngine::update(
         accStats.add((float)magnitude);
     }
 
-    // 3. Process Temperature Data
+    // -------------------------------------------------------
+    // 4. Process Temperature Data (always — real readings)
+    // -------------------------------------------------------
+
     if (temp.newData) {
         tempStats.add(temp.bodyTemperature);
     }
 
-    packet.timestamp = timestamp;
+    // -------------------------------------------------------
+    // 5. Build packet
+    // -------------------------------------------------------
 
-    // Retrieve computed values from DSP
-    packet.meanHR = hrv.getMeanHR();
-    packet.meanRR = hrv.getMeanRR();
-    packet.sdnn = hrv.getSDNN();
-    packet.rmssd = hrv.getRMSSD();
-    
-    // Retrieve computed Respiration
-    float meanBreathInterval = brStats.getMean();
-    if (meanBreathInterval > 0) {
-        packet.meanBR = 60000.0f / meanBreathInterval;
+    packet.timestamp = timestamp;
+    packet.isWorn = isWorn;
+
+    if (isWorn) {
+        // On-body: use real DSP-computed values
+        packet.meanHR = hrv.getMeanHR();
+        packet.meanRR = hrv.getMeanRR();
+        packet.sdnn = hrv.getSDNN();
+        packet.rmssd = hrv.getRMSSD();
+
+        // Respiration
+        float meanBreathInterval = brStats.getMean();
+        if (meanBreathInterval > 0) {
+            packet.meanBR = 60000.0f / meanBreathInterval;
+        } else {
+            packet.meanBR = 0.0f;
+        }
+        float stdBreathInterval = brStats.getStdDev();
+        if (meanBreathInterval > 0) {
+            packet.stdBR = (60000.0f / (meanBreathInterval * meanBreathInterval)) * stdBreathInterval;
+        } else {
+            packet.stdBR = 0.0f;
+        }
     } else {
+        // Off-body: zero out physiological values
+        packet.meanHR = 0.0f;
+        packet.meanRR = 0.0f;
+        packet.sdnn = 0.0f;
+        packet.rmssd = 0.0f;
         packet.meanBR = 0.0f;
-    }
-    float stdBreathInterval = brStats.getStdDev();
-    if (meanBreathInterval > 0) {
-        // Approximate standard deviation of Breathing Rate in BPM
-        packet.stdBR = (60000.0f / (meanBreathInterval * meanBreathInterval)) * stdBreathInterval;
-    } else {
         packet.stdBR = 0.0f;
     }
 
-    // Retrieve Temperature stats
+    // Temperature and accelerometer: always real readings
     packet.meanTemp = tempStats.getMean();
-    if (packet.meanTemp == 0.0f) packet.meanTemp = temp.bodyTemperature; // Fallback
     packet.stdTemp = tempStats.getStdDev();
 
-    // Retrieve IMU stats
     packet.meanAccMag = accStats.getMean();
     packet.stdAccMag = accStats.getStdDev();
 }
@@ -129,11 +164,16 @@ const HealthPacket& HealthEngine::getPacket()
     return packet;
 }
 
+bool HealthEngine::getIsWorn() const
+{
+    return isWorn;
+}
+
 String HealthEngine::toCSV()
 {
     String csv;
 
-    csv.reserve(150);
+    csv.reserve(160);
 
     csv += String(packet.timestamp);
     csv += ",";
@@ -156,6 +196,8 @@ String HealthEngine::toCSV()
     csv += String(packet.meanAccMag, 2);
     csv += ",";
     csv += String(packet.stdAccMag, 2);
+    csv += ",";
+    csv += String(packet.isWorn ? 1 : 0);
     csv += "\n";
 
     return csv;

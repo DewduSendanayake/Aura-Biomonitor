@@ -23,6 +23,7 @@ ADS1292R::ADS1292R() :
     spi(FSPI)
 {
     dataReady = false;
+    leadOffDetected = true;  // Assume off-body until first valid read
 }
 
 /************************************************/
@@ -87,21 +88,21 @@ void ADS1292R::hardwareReset()
 
 void ADS1292R::configure()
 {
-    writeRegister(0x01,0x02);
-    writeRegister(0x02,0x80);
+    writeRegister(0x01,0x02);   // CONFIG1: continuous, 500 SPS
+    writeRegister(0x02,0xC0);   // CONFIG2: lead-off comparator ON, internal ref
 
-    writeRegister(0x03,0x10);
+    writeRegister(0x03,0x13);   // LOFF: DC lead-off, 22nA, 70%/30% threshold
 
-    writeRegister(0x04,0x00);
-    writeRegister(0x05,0x00);
+    writeRegister(0x04,0x00);   // CH1SET: normal input, gain 6
+    writeRegister(0x05,0x00);   // CH2SET: normal input, gain 6
 
-    writeRegister(0x06,0x00);
-    writeRegister(0x07,0x00);
-    writeRegister(0x08,0x00);
+    writeRegister(0x06,0x00);   // RLD_SENS: disabled
+    writeRegister(0x07,0x0F);   // LOFF_SENS: enable lead-off for CH1P,CH1N,CH2P,CH2N
+    writeRegister(0x08,0x00);   // LOFF_STAT: read-only
 
-    writeRegister(0x09,0x02);
-    writeRegister(0x0A,0x02);
-    writeRegister(0x0B,0x0F);
+    writeRegister(0x09,0x02);   // RESP1
+    writeRegister(0x0A,0x02);   // RESP2
+    writeRegister(0x0B,0x0F);   // GPIO
 }
 
 /************************************************/
@@ -169,6 +170,13 @@ bool ADS1292R::readFrame(ECGData &data)
     digitalWrite(ECG_CS_PIN,HIGH);
 
     spi.endTransaction();
+
+    // Parse lead-off status from status byte 0, bits [4:7]
+    // Bit 4: IN1N_OFF, Bit 5: IN1P_OFF, Bit 6: IN2N_OFF, Bit 7: IN2P_OFF
+    // Any bit set = electrode not in contact with skin
+    uint8_t leadOffBits = (data.status[0] >> 4) & 0x0F;
+    leadOffDetected = (leadOffBits != 0);
+    data.leadOff = leadOffDetected;
 
     data.newData=true;
 
@@ -273,4 +281,11 @@ uint8_t ADS1292R::getID()
 bool ADS1292R::selfTest()
 {
     return (getID()==0x73);
+}
+
+/************************************************/
+
+bool ADS1292R::isLeadOff() const
+{
+    return leadOffDetected;
 }

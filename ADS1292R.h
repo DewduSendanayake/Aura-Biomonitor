@@ -29,11 +29,15 @@ public:
 
     uint8_t getID();
 
+    bool isLeadOff() const;
+
 private:
 
     SPIClass spi;
 
     volatile bool dataReady;
+
+    bool leadOffDetected;
 
     static ADS1292R* instance;
 

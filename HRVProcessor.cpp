@@ -62,3 +62,15 @@ float HRVProcessor::getMeanHR() const { return meanHR; }
 float HRVProcessor::getMeanRR() const { return meanRR; }
 float HRVProcessor::getSDNN() const { return sdnn; }
 float HRVProcessor::getRMSSD() const { return rmssd; }
+
+void HRVProcessor::reset() {
+    head = 0;
+    count = 0;
+    meanRR = 0;
+    sdnn = 0;
+    rmssd = 0;
+    meanHR = 0;
+    for(int i = 0; i < HRV_WINDOW_SIZE; i++) {
+        rr_buffer[i] = 0.0f;
+    }
+}

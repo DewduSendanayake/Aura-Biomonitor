@@ -16,6 +16,8 @@ public:
     float getMeanRR() const;
     float getSDNN() const;
     float getRMSSD() const;
+
+    void reset();
     
 private:
     float rr_buffer[HRV_WINDOW_SIZE];

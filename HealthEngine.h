@@ -21,6 +21,7 @@ struct HealthPacket
     float stdTemp;
     float meanAccMag;
     float stdAccMag;
+    bool  isWorn;       // true = on-body, false = off-body / lead-off
 };
 
 class HealthEngine
@@ -37,6 +38,8 @@ public:
 
     const HealthPacket& getPacket();
 
+    bool getIsWorn() const;
+
     String toCSV();
 
 private:
@@ -48,6 +51,9 @@ private:
     uint32_t stepCounter;
 
     bool moving;
+
+    bool isWorn;
+    bool wasWorn;       // previous state for edge detection
     
     QRSDetector qrs;
     HRVProcessor hrv;
