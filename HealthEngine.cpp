@@ -99,20 +99,23 @@ void HealthEngine::update(
         } else {
             packet.stdBR = 0.0f;
         }
+
+        // Temperature stats
+        packet.meanTemp = tempStats.getMean();
+        packet.stdTemp = tempStats.getStdDev();
     } else {
-        // Off-body: zero out physiological values
+        // Off-body: zero out physiological values and temperature
         packet.meanHR = 0.0f;
         packet.meanRR = 0.0f;
         packet.sdnn = 0.0f;
         packet.rmssd = 0.0f;
         packet.meanBR = 0.0f;
         packet.stdBR = 0.0f;
+        packet.meanTemp = 0.0f;
+        packet.stdTemp = 0.0f;
     }
 
-    // Temperature and accelerometer: always real readings
-    packet.meanTemp = tempStats.getMean();
-    packet.stdTemp = tempStats.getStdDev();
-
+    // Accelerometer: always real readings
     packet.meanAccMag = accStats.getMean();
     packet.stdAccMag = accStats.getStdDev();
 }
