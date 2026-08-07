@@ -66,9 +66,10 @@ bool ADS1292R::begin()
 
     // Verify critical registers were written correctly
     DBG_PRINTLN("ADS1292R Register Readback:");
-    DBG_PRINTF("  CONFIG2 (0x02): 0x%02X (expect 0xC0)\r\n", readRegister(0x02));
+    DBG_PRINTF("  CONFIG2 (0x02): 0x%02X (expect 0xE0)\r\n", readRegister(0x02));
     DBG_PRINTF("  LOFF    (0x03): 0x%02X (expect 0x00)\r\n", readRegister(0x03));
-    DBG_PRINTF("  LOFF_SENS(0x07): 0x%02X (expect 0x14)\r\n", readRegister(0x07));
+    DBG_PRINTF("  RLD_SENS(0x06): 0x%02X (expect 0x03)\r\n", readRegister(0x06));
+    DBG_PRINTF("  LOFF_SENS(0x07): 0x%02X (expect 0x03)\r\n", readRegister(0x07));
     DBG_PRINTF("  LOFF_STAT(0x08): 0x%02X\r\n", readRegister(0x08));
 
     attachInterrupt(
@@ -97,19 +98,19 @@ void ADS1292R::hardwareReset()
 void ADS1292R::configure()
 {
     writeRegister(0x01,0x02);   // CONFIG1: continuous, 500 SPS
-    writeRegister(0x02,0xC0);   // CONFIG2: lead-off comparator ON, internal ref
+    writeRegister(0x02,0xE0);   // CONFIG2: lead-off comparator ON, internal reference buffer ON (0xE0)
 
     writeRegister(0x03,0x00);   // LOFF: DC lead-off, 6nA, 95%/5% threshold
 
     writeRegister(0x04,0x00);   // CH1SET: normal input, gain 6
     writeRegister(0x05,0x00);   // CH2SET: normal input, gain 6
 
-    writeRegister(0x06,0x00);   // RLD_SENS: disabled
-    writeRegister(0x07,0x14);   // LOFF_SENS: bit4=SENSP1, bit2=SENSN1 → CH1 lead-off enabled
+    writeRegister(0x06,0x03);   // RLD_SENS: enable CH1P and CH1N for RLD common-mode drive
+    writeRegister(0x07,0x03);   // LOFF_SENS: bit1=LOFF1N, bit0=LOFF1P -> CH1 lead-off enabled
     writeRegister(0x08,0x00);   // LOFF_STAT: read-only
 
     writeRegister(0x09,0x02);   // RESP1
-    writeRegister(0x0A,0x02);   // RESP2
+    writeRegister(0x0A,0x03);   // RESP2: internal RLDREF enabled, bit0=1
     writeRegister(0x0B,0x0F);   // GPIO
 }
 
@@ -180,14 +181,14 @@ bool ADS1292R::readFrame(ECGData &data)
     spi.endTransaction();
 
     // Parse lead-off status from the 24-bit status word:
-    // status[0] bits 23:16 -> Bit 18 (0x04) = IN2N_OFF, Bit 17 (0x02) = IN2P_OFF, Bit 16 (0x01) = IN1N_OFF
-    // status[1] bits 15:8  -> Bit 15 (0x80) = IN1P_OFF
+    // status[0] bits 23:16 -> 1100 GPIO[1:0]
+    // status[1] bits 15:8  -> 0x00
+    // status[2] bits 7:0   -> Bit 1 (0x02) = IN1N_OFF, Bit 0 (0x01) = IN1P_OFF
     // Only check Channel 1 (Chest strap electrodes)
-    // Channel 2 is unconnected and will always trigger lead-off if checked
-    bool in1n_off = (data.status[0] & 0x01) != 0;
-    bool in1p_off = (data.status[1] & 0x80) != 0;
+    bool in1p_off = (data.status[2] & 0x01) != 0;
+    bool in1n_off = (data.status[2] & 0x02) != 0;
 
-    leadOffDetected = in1n_off || in1p_off;
+    leadOffDetected = in1p_off || in1n_off;
     data.leadOff = leadOffDetected;
 
     data.newData=true;
