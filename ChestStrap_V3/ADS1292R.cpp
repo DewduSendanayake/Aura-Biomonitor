@@ -1,4 +1,5 @@
 #include "ADS1292R.h"
+#include "Config.h"
 
 /************************************************
  * ADS1292R Commands
@@ -63,6 +64,13 @@ bool ADS1292R::begin()
 
     configure();
 
+    // Verify critical registers were written correctly
+    DBG_PRINTLN("ADS1292R Register Readback:");
+    DBG_PRINTF("  CONFIG2 (0x02): 0x%02X (expect 0xC0)\r\n", readRegister(0x02));
+    DBG_PRINTF("  LOFF    (0x03): 0x%02X (expect 0x00)\r\n", readRegister(0x03));
+    DBG_PRINTF("  LOFF_SENS(0x07): 0x%02X (expect 0x14)\r\n", readRegister(0x07));
+    DBG_PRINTF("  LOFF_STAT(0x08): 0x%02X\r\n", readRegister(0x08));
+
     attachInterrupt(
         digitalPinToInterrupt(ECG_DRDY_PIN),
         drdyISR,
@@ -91,13 +99,13 @@ void ADS1292R::configure()
     writeRegister(0x01,0x02);   // CONFIG1: continuous, 500 SPS
     writeRegister(0x02,0xC0);   // CONFIG2: lead-off comparator ON, internal ref
 
-    writeRegister(0x03,0x10);   // LOFF: DC lead-off, 6nA, 95%/5% threshold
+    writeRegister(0x03,0x00);   // LOFF: DC lead-off, 6nA, 95%/5% threshold
 
     writeRegister(0x04,0x00);   // CH1SET: normal input, gain 6
     writeRegister(0x05,0x00);   // CH2SET: normal input, gain 6
 
     writeRegister(0x06,0x00);   // RLD_SENS: disabled
-    writeRegister(0x07,0x03);   // LOFF_SENS: enable lead-off for CH1P,CH1N only
+    writeRegister(0x07,0x14);   // LOFF_SENS: bit4=SENSP1, bit2=SENSN1 → CH1 lead-off enabled
     writeRegister(0x08,0x00);   // LOFF_STAT: read-only
 
     writeRegister(0x09,0x02);   // RESP1
