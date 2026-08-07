@@ -91,13 +91,13 @@ void ADS1292R::configure()
     writeRegister(0x01,0x02);   // CONFIG1: continuous, 500 SPS
     writeRegister(0x02,0xC0);   // CONFIG2: lead-off comparator ON, internal ref
 
-    writeRegister(0x03,0x13);   // LOFF: DC lead-off, 22nA, 70%/30% threshold
+    writeRegister(0x03,0x10);   // LOFF: DC lead-off, 6nA, 95%/5% threshold
 
     writeRegister(0x04,0x00);   // CH1SET: normal input, gain 6
     writeRegister(0x05,0x00);   // CH2SET: normal input, gain 6
 
     writeRegister(0x06,0x00);   // RLD_SENS: disabled
-    writeRegister(0x07,0x0F);   // LOFF_SENS: enable lead-off for CH1P,CH1N,CH2P,CH2N
+    writeRegister(0x07,0x03);   // LOFF_SENS: enable lead-off for CH1P,CH1N only
     writeRegister(0x08,0x00);   // LOFF_STAT: read-only
 
     writeRegister(0x09,0x02);   // RESP1
@@ -171,11 +171,15 @@ bool ADS1292R::readFrame(ECGData &data)
 
     spi.endTransaction();
 
-    // Parse lead-off status from status byte 0, bits [4:7]
-    // Bit 4: IN1N_OFF, Bit 5: IN1P_OFF, Bit 6: IN2N_OFF, Bit 7: IN2P_OFF
-    // Any bit set = electrode not in contact with skin
-    uint8_t leadOffBits = (data.status[0] >> 4) & 0x0F;
-    leadOffDetected = (leadOffBits != 0);
+    // Parse lead-off status from the 24-bit status word:
+    // status[0] bits 23:16 -> Bit 18 (0x04) = IN2N_OFF, Bit 17 (0x02) = IN2P_OFF, Bit 16 (0x01) = IN1N_OFF
+    // status[1] bits 15:8  -> Bit 15 (0x80) = IN1P_OFF
+    // Only check Channel 1 (Chest strap electrodes)
+    // Channel 2 is unconnected and will always trigger lead-off if checked
+    bool in1n_off = (data.status[0] & 0x01) != 0;
+    bool in1p_off = (data.status[1] & 0x80) != 0;
+
+    leadOffDetected = in1n_off || in1p_off;
     data.leadOff = leadOffDetected;
 
     data.newData=true;

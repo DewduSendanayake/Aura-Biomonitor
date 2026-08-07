@@ -11,6 +11,7 @@ HealthEngine::HealthEngine()
 
     isWorn = false;
     wasWorn = false;
+    offBodyCount = 0;
     
     lp_z_sum = 0;
     lp_z_ptr = 0;
@@ -33,8 +34,20 @@ void HealthEngine::update(
 
     bool ecgContact = !ecg.leadOff;
     bool tempOnBody = (temp.bodyTemperature >= SKIN_TEMP_THRESHOLD);
+    bool currentWornState = ecgContact && tempOnBody;
 
-    isWorn = ecgContact && tempOnBody;
+    if (ecg.newData) { // Only evaluate debounce on new ECG samples (250Hz)
+        if (currentWornState) {
+            offBodyCount = 0;
+            isWorn = true;
+        } else {
+            if (offBodyCount < 250) { // Require 1 second (250 samples) of continuous off-body to toggle
+                offBodyCount++;
+            } else {
+                isWorn = false;
+            }
+        }
+    }
 
     // Edge detection: just came off body → reset HRV buffer
     if (wasWorn && !isWorn) {
@@ -43,10 +56,10 @@ void HealthEngine::update(
     wasWorn = isWorn;
 
     // -------------------------------------------------------
-    // 2. Process ECG Data for QRS detection (only when worn)
+    // 2. Process ECG Data for QRS detection (always process to keep filters stable)
     // -------------------------------------------------------
 
-    if (isWorn && ecg.newData) {
+    if (ecg.newData) {
         if (qrs.processSample(ecg.ch1, timestamp)) {
             hrv.addRRInterval((float)qrs.getLastRR());
         }
