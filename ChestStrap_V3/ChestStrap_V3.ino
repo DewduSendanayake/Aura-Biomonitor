@@ -212,9 +212,17 @@ void loop()
 
     if(Scheduler::BLE_Task())
     {
+        // Debug: raw ADS1292R status bytes and lead-off flag
+        DBG_PRINTF("ST: %02X %02X %02X | LOFF:%d | CH1:%ld\r\n",
+            sensorPacket.ecg.status[0],
+            sensorPacket.ecg.status[1],
+            sensorPacket.ecg.status[2],
+            sensorPacket.ecg.leadOff ? 1 : 0,
+            (long)sensorPacket.ecg.ch1);
+
         String csv = health.toCSV();;
 
-        DBG_PRINTLN(csv);
+        DBG_PRINT(csv);
 
         if(ble.connected())
         {
