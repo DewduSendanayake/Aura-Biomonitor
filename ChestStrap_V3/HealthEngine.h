@@ -54,7 +54,7 @@ private:
 
     bool isWorn;
     bool wasWorn;       // previous state for edge detection
-    uint8_t offBodyCount;
+    uint16_t offBodyCount;
     
     QRSDetector qrs;
     HRVProcessor hrv;
