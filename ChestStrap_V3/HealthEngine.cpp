@@ -11,7 +11,7 @@ HealthEngine::HealthEngine()
 
     isWorn = false;
     wasWorn = false;
-    offBodyCount = 500;
+    offBodyCount = 0;
     
     lp_z_sum = 0;
     lp_z_ptr = 0;
@@ -27,37 +27,43 @@ void HealthEngine::update(
     uint32_t timestamp)
 {
     // -------------------------------------------------------
-    // 1. Determine isWorn status (software-based)
-    //    When electrodes are floating (off-body), the ADS1292R
-    //    ADC output saturates at ±8388607 (0x7FFFFF).
-    //    When worn, the signal stays well within the ADC range.
-    //    Hardware lead-off detection proved unreliable on this board.
+    // 1. Determine isWorn status
+    //    Combines hardware lead-off detection with ECG saturation check:
+    //    - Hardware lead-off from ADS1292R (ecg.leadOff)
+    //    - Signal saturation at ±7,500,000 (~90% of 24-bit max)
     //
     //    Uses an integrating counter with hysteresis:
-    //    - Saturated sample → counter++
-    //    - Non-saturated    → counter--
-    //    - isWorn=false when counter >= 250 (~0.5s of saturation)
-    //    - isWorn=true  when counter <= 50  (~0.4s of good signal)
-    //    This prevents a single noisy sample from flipping the state.
+    //    - Off-body sample → counter++
+    //    - Valid sample   → counter--
+    //    - isWorn=false when counter >= 100 (~0.2s of off-body)
+    //    - isWorn=true  when counter <= 10  (~0.02s of good signal)
     // -------------------------------------------------------
 
     const int32_t SATURATION_THRESHOLD = 7500000; // ~90% of 24-bit max
 
     if (ecg.newData) {
         bool ecgSaturated = (ecg.ch1 > SATURATION_THRESHOLD || ecg.ch1 < -SATURATION_THRESHOLD);
-
-        if (ecgSaturated) {
-            if (offBodyCount < 500) offBodyCount++;
+        
+        // Primary indicator: Hardware lead-off from ADS1292R
+        // If electrodes are touching skin (ecg.leadOff == false), decrement offBodyCount
+        if (!ecg.leadOff) {
+            if (ecgSaturated) {
+                // Saturated while attached: minor penalty, but keep on-body state
+                if (offBodyCount < 30) offBodyCount++;
+            } else {
+                if (offBodyCount > 0) offBodyCount--;
+            }
         } else {
-            if (offBodyCount > 0) offBodyCount--;
+            // Electrodes disconnected
+            if (offBodyCount < 500) offBodyCount++;
         }
 
-        if (offBodyCount >= 250) {
+        if (offBodyCount >= 100) {
             isWorn = false;
-        } else if (offBodyCount <= 50) {
+        } else if (offBodyCount <= 10) {
             isWorn = true;
         }
-        // Between 50-250: keep previous state (hysteresis)
+        // Between 10-100: keep previous state (hysteresis)
     }
 
     // Edge detection: just came off body → reset HRV buffer
