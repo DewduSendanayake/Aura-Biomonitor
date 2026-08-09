@@ -25,9 +25,9 @@ public:
 private:
     SPIClass spi;
 
-    // DRDY is 500 Hz. A boolean loses events if the main loop is briefly busy.
-    // Keep a small pending-sample count so the acquisition path can catch up.
-    volatile uint8_t dataReadyCount;
+    // ADS1292R does not provide a host-readable FIFO in RDATAC mode.
+    // DRDY therefore represents one current conversion frame, not a queue.
+    volatile bool dataReady;
     bool leadOffDetected;
 
     static ADS1292R* instance;
