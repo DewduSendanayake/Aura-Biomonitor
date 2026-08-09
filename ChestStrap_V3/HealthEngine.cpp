@@ -1,22 +1,37 @@
 #include "HealthEngine.h"
 #include "Config.h"
+#include <math.h>
 
 HealthEngine::HealthEngine()
 {
-    memset(&packet,0,sizeof(packet));
-
+    memset(&packet, 0, sizeof(packet));
     lastPacketTime = 0;
     stepCounter = 0;
     moving = false;
-
     isWorn = false;
     wasWorn = false;
     offBodyCount = 0;
-    
+
     lp_z_sum = 0;
     lp_z_ptr = 0;
     memset(lp_z_buffer, 0, sizeof(lp_z_buffer));
     breathingIn = false;
+    hasLastBreath = false;
+    lastBreathTime = 0;
+}
+
+void HealthEngine::resetPhysiologicalWindows()
+{
+    hrv.reset();
+    tempStats.reset();
+    accStats.reset();
+    brStats.reset();
+
+    lp_z_sum = 0;
+    lp_z_ptr = 0;
+    memset(lp_z_buffer, 0, sizeof(lp_z_buffer));
+    breathingIn = false;
+    hasLastBreath = false;
     lastBreathTime = 0;
 }
 
@@ -26,35 +41,19 @@ void HealthEngine::update(
     const TemperatureData& temp,
     uint32_t timestamp)
 {
-    // -------------------------------------------------------
-    // 1. Determine isWorn status
-    //    Combines hardware lead-off detection with ECG saturation check:
-    //    - Hardware lead-off from ADS1292R (ecg.leadOff)
-    //    - Signal saturation at ±7,500,000 (~90% of 24-bit max)
-    //
-    //    Uses an integrating counter with hysteresis:
-    //    - Off-body sample → counter++
-    //    - Valid sample   → counter--
-    //    - isWorn=false when counter >= 100 (~0.2s of off-body)
-    //    - isWorn=true  when counter <= 10  (~0.02s of good signal)
-    // -------------------------------------------------------
-
-    const int32_t SATURATION_THRESHOLD = 7500000; // ~90% of 24-bit max
+    const int32_t SATURATION_THRESHOLD = 7500000;
 
     if (ecg.newData) {
-        bool ecgSaturated = (ecg.ch1 > SATURATION_THRESHOLD || ecg.ch1 < -SATURATION_THRESHOLD);
-        
-        // Primary indicator: Hardware lead-off from ADS1292R
-        // If electrodes are touching skin (ecg.leadOff == false), decrement offBodyCount
+        const bool ecgSaturated =
+            (ecg.ch1 > SATURATION_THRESHOLD || ecg.ch1 < -SATURATION_THRESHOLD);
+
         if (!ecg.leadOff) {
             if (ecgSaturated) {
-                // Saturated while attached: minor penalty, but keep on-body state
                 if (offBodyCount < 30) offBodyCount++;
             } else {
                 if (offBodyCount > 0) offBodyCount--;
             }
         } else {
-            // Electrodes disconnected
             if (offBodyCount < 500) offBodyCount++;
         }
 
@@ -63,18 +62,12 @@ void HealthEngine::update(
         } else if (offBodyCount <= 10) {
             isWorn = true;
         }
-        // Between 10-100: keep previous state (hysteresis)
     }
 
-    // Edge detection: just came off body → reset HRV buffer
     if (wasWorn && !isWorn) {
-        hrv.reset();
+        resetPhysiologicalWindows();
     }
     wasWorn = isWorn;
-
-    // -------------------------------------------------------
-    // 2. Process ECG Data for QRS detection (always process to keep filters stable)
-    // -------------------------------------------------------
 
     if (ecg.newData) {
         if (qrs.processSample(ecg.ch1, timestamp)) {
@@ -82,59 +75,49 @@ void HealthEngine::update(
         }
     }
 
-    // -------------------------------------------------------
-    // 3. Process IMU Data (always — useful for diagnostics)
-    // -------------------------------------------------------
-
     if (imu.newData) {
         detectMotion(imu);
         detectRespiration(imu, timestamp);
-        
-        int32_t magnitude = abs(imu.ax) + abs(imu.ay) + abs(imu.az);
-        accStats.add((float)magnitude);
-    }
 
-    // -------------------------------------------------------
-    // 4. Process Temperature Data (always — real readings)
-    // -------------------------------------------------------
+        // MPU6500 is configured for ±2 g, where 16384 counts = 1 g.
+        // The previous code used abs(ax)+abs(ay)+abs(az) in raw ADC counts,
+        // producing values around 16384 at rest while the model feature is
+        // defined as acceleration magnitude in g (around 1.0 at rest).
+        const float ax_g = (float)imu.ax / 16384.0f;
+        const float ay_g = (float)imu.ay / 16384.0f;
+        const float az_g = (float)imu.az / 16384.0f;
+        const float accMagnitude = sqrtf(
+            ax_g * ax_g + ay_g * ay_g + az_g * az_g);
+        accStats.add(accMagnitude);
+    }
 
     if (temp.newData) {
         tempStats.add(temp.bodyTemperature);
     }
 
-    // -------------------------------------------------------
-    // 5. Build packet
-    // -------------------------------------------------------
-
     packet.timestamp = timestamp;
     packet.isWorn = isWorn;
 
     if (isWorn) {
-        // On-body: use real DSP-computed values
         packet.meanHR = hrv.getMeanHR();
         packet.meanRR = hrv.getMeanRR();
         packet.sdnn = hrv.getSDNN();
         packet.rmssd = hrv.getRMSSD();
 
-        // Respiration
-        float meanBreathInterval = brStats.getMean();
+        const float meanBreathInterval = brStats.getMean();
         if (meanBreathInterval > 0) {
             packet.meanBR = 60000.0f / meanBreathInterval;
+            packet.stdBR =
+                (60000.0f / (meanBreathInterval * meanBreathInterval)) *
+                brStats.getStdDev();
         } else {
             packet.meanBR = 0.0f;
-        }
-        float stdBreathInterval = brStats.getStdDev();
-        if (meanBreathInterval > 0) {
-            packet.stdBR = (60000.0f / (meanBreathInterval * meanBreathInterval)) * stdBreathInterval;
-        } else {
             packet.stdBR = 0.0f;
         }
 
-        // Temperature stats
         packet.meanTemp = tempStats.getMean();
         packet.stdTemp = tempStats.getStdDev();
     } else {
-        // Off-body: zero out physiological values and temperature
         packet.meanHR = 0.0f;
         packet.meanRR = 0.0f;
         packet.sdnn = 0.0f;
@@ -143,31 +126,34 @@ void HealthEngine::update(
         packet.stdBR = 0.0f;
         packet.meanTemp = 0.0f;
         packet.stdTemp = 0.0f;
+        packet.meanAccMag = 0.0f;
+        packet.stdAccMag = 0.0f;
+        return;
     }
 
-    // Accelerometer: always real readings
     packet.meanAccMag = accStats.getMean();
     packet.stdAccMag = accStats.getStdDev();
 }
 
-void HealthEngine::detectRespiration(const IMUData& imu, uint32_t timestamp) {
-    // Simple 32-sample moving average low-pass filter on Z-axis to extract breathing
+void HealthEngine::detectRespiration(const IMUData& imu, uint32_t timestamp)
+{
     int32_t out = lp_z_buffer[lp_z_ptr];
     lp_z_sum -= out;
     lp_z_buffer[lp_z_ptr] = imu.az;
     lp_z_sum += imu.az;
     lp_z_ptr = (lp_z_ptr + 1) % 32;
-    
-    int32_t lp_z = lp_z_sum / 32;
-    
-    // Very basic zero-crossing / threshold detection on the filtered Z-axis
-    // Normal gravity on Z is ~16384 for 2G scale. Breathing causes small fluctuations.
+
+    const int32_t lp_z = lp_z_sum / 32;
+
     if (lp_z > 16500 && !breathingIn) {
         breathingIn = true;
-        if (timestamp - lastBreathTime > 1000) { // min 1 sec between breaths (max 60 bpm)
+
+        if (hasLastBreath && timestamp - lastBreathTime > 1000) {
             brStats.add((float)(timestamp - lastBreathTime));
-            lastBreathTime = timestamp;
         }
+
+        lastBreathTime = timestamp;
+        hasLastBreath = true;
     } else if (lp_z < 16200 && breathingIn) {
         breathingIn = false;
     }
@@ -175,19 +161,13 @@ void HealthEngine::detectRespiration(const IMUData& imu, uint32_t timestamp) {
 
 void HealthEngine::detectMotion(const IMUData& imu)
 {
-    int32_t magnitude =
-        abs(imu.ax) +
-        abs(imu.ay) +
-        abs(imu.az);
+    const int32_t magnitude =
+        abs(imu.ax) + abs(imu.ay) + abs(imu.az);
 
-    if(magnitude > 5000)
-    {
+    if(magnitude > 5000) {
         moving = true;
-
         stepCounter++;
-    }
-    else
-    {
+    } else {
         moving = false;
     }
 }
@@ -205,9 +185,7 @@ bool HealthEngine::getIsWorn() const
 String HealthEngine::toCSV()
 {
     String csv;
-
     csv.reserve(160);
-
     csv += String(packet.timestamp);
     csv += ",";
     csv += String(packet.meanHR, 2);
@@ -232,6 +210,5 @@ String HealthEngine::toCSV()
     csv += ",";
     csv += String(packet.isWorn ? 1 : 0);
     csv += "\n";
-
     return csv;
 }
