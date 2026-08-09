@@ -57,9 +57,10 @@ bool ADS1292R::begin()
     DBG_PRINTF("  CONFIG2   (0x02): 0x%02X (expect 0xE0)\r\n", readRegister(0x02));
     DBG_PRINTF("  LOFF      (0x03): 0x%02X (expect 0x10)\r\n", readRegister(0x03));
     DBG_PRINTF("  CH1SET    (0x04): 0x%02X (expect 0x00)\r\n", readRegister(0x04));
+    DBG_PRINTF("  CH2SET    (0x05): 0x%02X (expect 0x00)\r\n", readRegister(0x05));
     DBG_PRINTF("  RLD_SENS  (0x06): 0x%02X (expect 0x2C)\r\n", readRegister(0x06));
-    DBG_PRINTF("  LOFF_SENS (0x07): 0x%02X (expect 0x03)\r\n", readRegister(0x07));
-    DBG_PRINTF("  LOFF_STAT (0x08): 0x%02X\r\n", readRegister(0x08));
+    DBG_PRINTF("  LOFF_SENS (0x07): 0x%02X (expect 0x0C)\r\n", readRegister(0x07));
+    DBG_PRINTF("  LOFF_STAT (0x08): 0x%02X (initial only)\r\n", readRegister(0x08));
 
     attachInterrupt(digitalPinToInterrupt(ECG_DRDY_PIN), drdyISR, FALLING);
 
@@ -83,19 +84,21 @@ void ADS1292R::configure()
     // Lead-off comparators and internal 2.42 V reference buffer enabled.
     writeRegister(0x02, 0xE0);
 
-    // DC lead-off detection, 6 nA excitation current. Bit 4 is reserved and
-    // must remain 1 for this register configuration.
+    // DC lead-off detection, 6 nA excitation current.
     writeRegister(0x03, 0x10);
 
-    // Normal electrode input, PGA gain 6.
+    // Both channels enabled, normal electrode input, PGA gain 6.
     writeRegister(0x04, 0x00);
     writeRegister(0x05, 0x00);
 
-    // Enable RLD buffer and derive RLD from CH2P/CH2N.
+    // RLD is derived from Channel 2 (IN2P/IN2N), which is the ECG channel
+    // in the ADS1292R ECG + respiration reference topology.
     writeRegister(0x06, 0x2C);
 
-    // Lead-off detection on Channel 1 positive and negative electrodes.
-    writeRegister(0x07, 0x03);
+    // Monitor Channel 2 electrode connections for lead-off detection:
+    // bit 3 = LOFF2N, bit 2 = LOFF2P.
+    // The previous 0x03 monitored Channel 1, which is the respiration path.
+    writeRegister(0x07, 0x0C);
 
     // Respiration is derived from the MPU6500 in this firmware.
     writeRegister(0x09, 0x02);
@@ -173,6 +176,7 @@ bool ADS1292R::readFrame(ECGData &data)
     digitalWrite(ECG_CS_PIN, HIGH);
     spi.endTransaction();
 
+    // The 24-bit status word begins with the fixed 1100 prefix.
     const bool validStatus = (data.status[0] & 0xF0) == 0xC0;
 
     if(!validStatus)
@@ -187,18 +191,21 @@ bool ADS1292R::readFrame(ECGData &data)
         return false;
     }
 
-    // LOFF_STAT occupies status bits 19:15:
+    // ADS1292R output status bits are:
+    //   1100 + LOFF_STAT[4:0] + GPIO[1:0] + 13 zeros.
+    // Therefore:
     //   status[0] bits 3:0 = LOFF_STAT[4:1]
     //   status[1] bit 7    = LOFF_STAT[0]
-    // For CH1, bit 0 = IN1P_OFF and bit 1 = IN1N_OFF.
     const uint8_t loffStat =
         (uint8_t)(((data.status[0] & 0x0F) << 1) |
                   ((data.status[1] >> 7) & 0x01));
 
-    const bool in1p_off = (loffStat & 0x01) != 0;
-    const bool in1n_off = (loffStat & 0x02) != 0;
+    // Channel 2 is the ECG channel in this hardware topology.
+    // LOFF_STAT bit 3 = IN2N_OFF, bit 2 = IN2P_OFF.
+    const bool in2n_off = (loffStat & 0x08) != 0;
+    const bool in2p_off = (loffStat & 0x04) != 0;
 
-    leadOffDetected = in1p_off || in1n_off;
+    leadOffDetected = in2p_off || in2n_off;
     data.leadOff = leadOffDetected;
     data.newData = true;
 
