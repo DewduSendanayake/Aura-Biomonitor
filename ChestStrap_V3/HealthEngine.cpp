@@ -44,8 +44,9 @@ void HealthEngine::update(
     const int32_t SATURATION_THRESHOLD = 7500000;
 
     if (ecg.newData) {
+        // ADS1292R Channel 2 is the ECG path in this board topology.
         const bool ecgSaturated =
-            (ecg.ch1 > SATURATION_THRESHOLD || ecg.ch1 < -SATURATION_THRESHOLD);
+            (ecg.ch2 > SATURATION_THRESHOLD || ecg.ch2 < -SATURATION_THRESHOLD);
 
         if (!ecg.leadOff) {
             if (ecgSaturated) {
@@ -69,8 +70,11 @@ void HealthEngine::update(
     }
     wasWorn = isWorn;
 
-    if (ecg.newData) {
-        if (qrs.processSample(ecg.ch1, timestamp)) {
+    // Never let off-body ECG noise populate the HR/HRV state. The previous
+    // implementation processed QRS peaks even while the strap was considered
+    // off-body and only zeroed the output packet afterwards.
+    if (ecg.newData && isWorn) {
+        if (qrs.processSample(ecg.ch2, timestamp)) {
             hrv.addRRInterval((float)qrs.getLastRR());
         }
     }
@@ -80,9 +84,6 @@ void HealthEngine::update(
         detectRespiration(imu, timestamp);
 
         // MPU6500 is configured for ±2 g, where 16384 counts = 1 g.
-        // The previous code used abs(ax)+abs(ay)+abs(az) in raw ADC counts,
-        // producing values around 16384 at rest while the model feature is
-        // defined as acceleration magnitude in g (around 1.0 at rest).
         const float ax_g = (float)imu.ax / 16384.0f;
         const float ay_g = (float)imu.ay / 16384.0f;
         const float az_g = (float)imu.az / 16384.0f;
