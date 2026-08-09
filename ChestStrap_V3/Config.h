@@ -8,7 +8,7 @@
  **********************************************************/
 
 #define FW_NAME        "Chest Strap V3"
-#define FW_VERSION     "1.0.0"
+#define FW_VERSION     "1.0.1"
 
 /**********************************************************
  *                     Debug
@@ -63,7 +63,7 @@
  *                Off-Body Detection
  **********************************************************/
 
-#define SKIN_TEMP_THRESHOLD  30.0f   // °C — below this = off-body (room temp)
+#define SKIN_TEMP_THRESHOLD  30.0f   // °C — diagnostic threshold
 
 /**********************************************************
  *                 Sampling Frequencies
