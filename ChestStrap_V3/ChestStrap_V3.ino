@@ -160,7 +160,7 @@ void loop()
     }
     else
     {
-        // ECG hardware not available — treat as lead-off
+        // ECG hardware not available - treat as lead-off.
         sensorPacket.ecg.leadOff = true;
     }
 
@@ -212,15 +212,23 @@ void loop()
 
     if(Scheduler::BLE_Task())
     {
-        // Debug: raw ADS1292R status bytes and lead-off flag
-        DBG_PRINTF("ST: %02X %02X %02X | LOFF:%d | CH1:%ld\r\n",
+        // ADS1292R status format:
+        // 1100 + LOFF_STAT[4:0] + GPIO[1:0] + 13 zero bits.
+        const uint8_t loffStat =
+            (uint8_t)(((sensorPacket.ecg.status[0] & 0x0F) << 1) |
+                      ((sensorPacket.ecg.status[1] >> 7) & 0x01));
+
+        DBG_PRINTF(
+            "ST: %02X %02X %02X | LOFFSTAT:%02X | LOFF:%d | CH1:%ld | CH2:%ld\r\n",
             sensorPacket.ecg.status[0],
             sensorPacket.ecg.status[1],
             sensorPacket.ecg.status[2],
+            loffStat,
             sensorPacket.ecg.leadOff ? 1 : 0,
-            (long)sensorPacket.ecg.ch1);
+            (long)sensorPacket.ecg.ch1,
+            (long)sensorPacket.ecg.ch2);
 
-        String csv = health.toCSV();;
+        String csv = health.toCSV();
 
         DBG_PRINT(csv);
 
