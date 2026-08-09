@@ -37,13 +37,15 @@ bool ADS1292R::begin()
     pinMode(ECG_DRDY_PIN, INPUT_PULLUP);
 
     digitalWrite(ECG_CS_PIN, HIGH);
-    digitalWrite(ECG_START_PIN, HIGH);
+    digitalWrite(ECG_START_PIN, LOW);
 
     spi.begin(ECG_SCLK_PIN, ECG_MISO_PIN, ECG_MOSI_PIN, ECG_CS_PIN);
 
     hardwareReset();
 
+    // Keep the ADS1292R out of RDATAC while registers are configured.
     sendCommand(SDATAC);
+    delayMicroseconds(20);
 
     if(getID() != 0x73)
         return false;
@@ -103,20 +105,27 @@ void ADS1292R::configure()
 
 void ADS1292R::start()
 {
-    // Clear any stale DRDY event before entering continuous data mode.
+    // Use the START pin to control conversions. Do not enter RDATAC mode.
+    // RDATA is used after each DRDY event so every read is explicitly tied to
+    // one conversion and there is no continuous-mode frame synchronization
+    // ambiguity.
     noInterrupts();
     dataReady = false;
     interrupts();
 
-    sendCommand(START_CMD);
+    digitalWrite(ECG_START_PIN, HIGH);
     delay(10);
-    sendCommand(RDATAC);
+
+    // Discard any DRDY edge generated while the device was starting. The next
+    // falling edge represents the first conversion we intentionally read.
+    noInterrupts();
+    dataReady = false;
+    interrupts();
 }
 
 void ADS1292R::stop()
 {
-    sendCommand(SDATAC);
-    sendCommand(STOP_CMD);
+    digitalWrite(ECG_START_PIN, LOW);
 
     noInterrupts();
     dataReady = false;
@@ -142,15 +151,18 @@ bool ADS1292R::read(ECGData &data)
     if(!ready)
         return false;
 
+    // RDATA must be issued after DRDY goes low while the device is not in
+    // RDATAC mode. It returns exactly one 72-bit conversion frame.
     return readFrame(data);
 }
 
 bool ADS1292R::readFrame(ECGData &data)
 {
-    // One DRDY event corresponds to one current conversion frame. Read exactly
-    // the 3 status bytes + 2 channels (6 bytes), then release CS.
     spi.beginTransaction(SPISettings(ECG_SPI_SPEED, MSBFIRST, SPI_MODE1));
     digitalWrite(ECG_CS_PIN, LOW);
+
+    // RDATA opcode followed immediately by the 72-bit conversion result.
+    spi.transfer(RDATA);
 
     data.status[0] = spi.transfer(0x00);
     data.status[1] = spi.transfer(0x00);
@@ -161,8 +173,6 @@ bool ADS1292R::readFrame(ECGData &data)
     digitalWrite(ECG_CS_PIN, HIGH);
     spi.endTransaction();
 
-    // The ADS1292R status word has a fixed 1100 prefix. If that prefix is not
-    // present, the frame is not trustworthy and must not reach QRS/HRV code.
     const bool validStatus = (data.status[0] & 0xF0) == 0xC0;
 
     if(!validStatus)
@@ -177,9 +187,16 @@ bool ADS1292R::readFrame(ECGData &data)
         return false;
     }
 
-    // LOFF_STAT bits 1:0 are IN1N_OFF and IN1P_OFF.
-    const bool in1p_off = (data.status[2] & 0x01) != 0;
-    const bool in1n_off = (data.status[2] & 0x02) != 0;
+    // LOFF_STAT occupies status bits 19:15:
+    //   status[0] bits 3:0 = LOFF_STAT[4:1]
+    //   status[1] bit 7    = LOFF_STAT[0]
+    // For CH1, bit 0 = IN1P_OFF and bit 1 = IN1N_OFF.
+    const uint8_t loffStat =
+        (uint8_t)(((data.status[0] & 0x0F) << 1) |
+                  ((data.status[1] >> 7) & 0x01));
+
+    const bool in1p_off = (loffStat & 0x01) != 0;
+    const bool in1n_off = (loffStat & 0x02) != 0;
 
     leadOffDetected = in1p_off || in1n_off;
     data.leadOff = leadOffDetected;
