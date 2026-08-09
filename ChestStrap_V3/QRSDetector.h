@@ -6,18 +6,15 @@
 class QRSDetector {
 public:
     QRSDetector();
-    
-    // Process a new raw ECG sample. Returns true if an R-peak is detected.
+
     bool processSample(int32_t sample, uint32_t timestamp);
-    
-    // Get the RR interval of the last detected peak
     uint32_t getLastRR() const;
 
 private:
     uint32_t lastPeakTime;
     uint32_t currentRR;
+    bool hasLastPeak;
 
-    // Filter buffers and states
     int32_t lp_buffer[12];
     int lp_ptr;
     int32_t lp_sum;
@@ -29,19 +26,16 @@ private:
     int32_t deriv_buffer[4];
     int deriv_ptr;
 
-    // Moving window integrator (MWI)
     #define MWI_SIZE 15
     int32_t mwi_buffer[MWI_SIZE];
     int mwi_ptr;
     int32_t mwi_sum;
 
-    // Thresholds
     int32_t threshold1;
     int32_t threshold2;
     int32_t signalPeak;
     int32_t noisePeak;
-    
-    // State
+
     int missedBeats;
     uint32_t lastSampleTime;
     bool peakDetected;

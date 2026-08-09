@@ -3,18 +3,16 @@
 QRSDetector::QRSDetector() {
     lastPeakTime = 0;
     currentRR = 0;
-    
+    hasLastPeak = false;
+
     lp_ptr = 0;
     lp_sum = 0;
     memset(lp_buffer, 0, sizeof(lp_buffer));
-
     hp_ptr = 0;
     hp_sum = 0;
     memset(hp_buffer, 0, sizeof(hp_buffer));
-
     deriv_ptr = 0;
     memset(deriv_buffer, 0, sizeof(deriv_buffer));
-
     mwi_ptr = 0;
     mwi_sum = 0;
     memset(mwi_buffer, 0, sizeof(mwi_buffer));
@@ -23,7 +21,6 @@ QRSDetector::QRSDetector() {
     threshold2 = 0;
     signalPeak = 0;
     noisePeak = 0;
-    
     missedBeats = 0;
     lastSampleTime = 0;
     peakDetected = false;
@@ -49,7 +46,9 @@ int32_t QRSDetector::highPassFilter(int32_t sample) {
 }
 
 int32_t QRSDetector::derivative(int32_t sample) {
-    int32_t out = (2 * sample) + deriv_buffer[(deriv_ptr + 3) % 4] - deriv_buffer[(deriv_ptr + 1) % 4] - (2 * deriv_buffer[deriv_ptr]);
+    int32_t out = (2 * sample) + deriv_buffer[(deriv_ptr + 3) % 4]
+                - deriv_buffer[(deriv_ptr + 1) % 4]
+                - (2 * deriv_buffer[deriv_ptr]);
     deriv_buffer[deriv_ptr] = sample;
     deriv_ptr = (deriv_ptr + 1) % 4;
     return out / 8;
@@ -65,9 +64,8 @@ int32_t QRSDetector::movingWindowIntegral(int32_t sample) {
 }
 
 bool QRSDetector::processSample(int32_t sample, uint32_t timestamp) {
-    // Basic scaling down to avoid overflow
     sample = sample / 1024;
-    
+
     int32_t lp = lowPassFilter(sample);
     int32_t hp = highPassFilter(lp);
     int32_t deriv = derivative(hp);
@@ -78,35 +76,37 @@ bool QRSDetector::processSample(int32_t sample, uint32_t timestamp) {
 
     if (refractoryTimer > 0) {
         refractoryTimer--;
-    } else {
-        if (mwi > threshold1) {
-            if (timestamp - lastPeakTime > 250) { // 250ms refractory period (240 BPM max)
-                rPeak = true;
+    } else if (mwi > threshold1) {
+        if (!hasLastPeak || timestamp - lastPeakTime > 250) {
+            rPeak = true;
+
+            // The first detected peak establishes timing only. It is not an
+            // RR interval because there is no preceding heartbeat yet.
+            if (hasLastPeak) {
                 currentRR = timestamp - lastPeakTime;
-                lastPeakTime = timestamp;
-                
-                signalPeak = 0.125 * mwi + 0.875 * signalPeak;
-                threshold1 = noisePeak + 0.25 * (signalPeak - noisePeak);
-                threshold2 = 0.5 * threshold1;
-                
-                refractoryTimer = 100; // Refractory period in samples (approx 200ms at 500SPS)
             }
-        } else {
-            noisePeak = 0.125 * mwi + 0.875 * noisePeak;
-            threshold1 = noisePeak + 0.25 * (signalPeak - noisePeak);
-            threshold2 = 0.5 * threshold1;
+
+            lastPeakTime = timestamp;
+            hasLastPeak = true;
+
+            signalPeak = (int32_t)(0.125f * mwi + 0.875f * signalPeak);
+            threshold1 = (int32_t)(noisePeak + 0.25f * (signalPeak - noisePeak));
+            threshold2 = threshold1 / 2;
+            refractoryTimer = 100;
         }
-    }
-    
-    // Very basic dynamic threshold init
-    if (signalPeak == 0) {
-        if (mwi > 1000) {
-            signalPeak = mwi;
-            threshold1 = signalPeak / 4;
-        }
+    } else {
+        noisePeak = (int32_t)(0.125f * mwi + 0.875f * noisePeak);
+        threshold1 = (int32_t)(noisePeak + 0.25f * (signalPeak - noisePeak));
+        threshold2 = threshold1 / 2;
     }
 
-    return rPeak;
+    if (signalPeak == 0 && mwi > 1000) {
+        signalPeak = mwi;
+        threshold1 = signalPeak / 4;
+    }
+
+    // Only expose a detection when a real RR interval exists.
+    return rPeak && hasLastPeak && currentRR >= 300 && currentRR <= 2000;
 }
 
 uint32_t QRSDetector::getLastRR() const {

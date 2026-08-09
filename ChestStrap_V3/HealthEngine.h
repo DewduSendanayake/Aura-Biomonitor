@@ -21,13 +21,12 @@ struct HealthPacket
     float stdTemp;
     float meanAccMag;
     float stdAccMag;
-    bool  isWorn;       // true = on-body, false = off-body / lead-off
+    bool isWorn;
 };
 
 class HealthEngine
 {
 public:
-
     HealthEngine();
 
     void update(
@@ -37,41 +36,35 @@ public:
         uint32_t timestamp);
 
     const HealthPacket& getPacket();
-
     bool getIsWorn() const;
-
     String toCSV();
 
 private:
-
     HealthPacket packet;
-
     uint32_t lastPacketTime;
-
     uint32_t stepCounter;
-
     bool moving;
 
     bool isWorn;
-    bool wasWorn;       // previous state for edge detection
+    bool wasWorn;
     uint16_t offBodyCount;
-    
+
     QRSDetector qrs;
     HRVProcessor hrv;
-    StatsWindow<float, 10> tempStats; // 10s window (1 Hz temp data)
-    StatsWindow<float, 100> accStats; // 1s window (100 Hz IMU data)
+    StatsWindow<float, 10> tempStats;
+    StatsWindow<float, 100> accStats;
 
-    // Respiration tracking state
     int32_t lp_z_sum;
     int32_t lp_z_buffer[32];
     int lp_z_ptr;
     bool breathingIn;
+    bool hasLastBreath;
     uint32_t lastBreathTime;
-    StatsWindow<float, 5> brStats; // 5 breath window
+    StatsWindow<float, 5> brStats;
 
+    void resetPhysiologicalWindows();
     void detectMotion(const IMUData& imu);
     void detectRespiration(const IMUData& imu, uint32_t timestamp);
-
 };
 
 #endif
