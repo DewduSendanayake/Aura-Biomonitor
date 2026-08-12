@@ -2,49 +2,133 @@
 #define QRSDETECTOR_H
 
 #include <Arduino.h>
+#include <math.h>
 
-class QRSDetector {
+class QRSDetector
+{
 public:
+
     QRSDetector();
 
+    // Process one ECG sample.
+    // sample    = raw signed ADS1292R CH1 sample
+    // timestamp = timestamp in milliseconds
+    //
+    // Returns true only when a valid RR interval has been detected.
     bool processSample(int32_t sample, uint32_t timestamp);
+
+    // Last accepted RR interval in milliseconds.
     uint32_t getLastRR() const;
 
+    // Reset detector state.
+    void reset();
+
 private:
+
+    /************************************************
+     * Sampling
+     ************************************************/
+
+    static constexpr float SAMPLE_RATE = 500.0f;
+
+    /************************************************
+     * ECG Band-pass
+     *
+     * 5 Hz high-pass
+     * 15 Hz low-pass
+     ************************************************/
+
+    float hp_x1;
+    float hp_x2;
+    float hp_y1;
+    float hp_y2;
+
+    float lp_x1;
+    float lp_x2;
+    float lp_y1;
+    float lp_y2;
+
+    float bandPassFilter(float sample);
+
+    /************************************************
+     * QRS processing
+     ************************************************/
+
+    static constexpr int MWI_SIZE = 15;
+
+    float mwiBuffer[MWI_SIZE];
+    int mwiIndex;
+    float mwiSum;
+
+    float movingWindowIntegral(float sample);
+
+    /************************************************
+     * Adaptive threshold
+     ************************************************/
+
+    float signalPeak;
+    float noisePeak;
+    float threshold;
+
+    bool initialized;
+
+    /************************************************
+     * Peak detection
+     ************************************************/
+
+    float previousMWI;
+    float currentMWI;
+    float nextMWI;
+
+    uint32_t candidatePeakTime;
+
+    bool aboveThreshold;
+
+    /************************************************
+     * R-peak timing
+     ************************************************/
+
     uint32_t lastPeakTime;
     uint32_t currentRR;
+
     bool hasLastPeak;
 
-    int32_t lp_buffer[12];
-    int lp_ptr;
-    int32_t lp_sum;
+    /************************************************
+     * Refractory period
+     ************************************************/
 
-    int32_t hp_buffer[32];
-    int hp_ptr;
-    int32_t hp_sum;
+    uint32_t refractoryUntil;
 
-    int32_t deriv_buffer[4];
-    int deriv_ptr;
+    static constexpr uint32_t REFRACTORY_MS = 250;
 
-    #define MWI_SIZE 15
-    int32_t mwi_buffer[MWI_SIZE];
-    int mwi_ptr;
-    int32_t mwi_sum;
+    /************************************************
+     * Physiological limits
+     ************************************************/
 
-    int32_t threshold1;
-    int32_t threshold2;
-    int32_t signalPeak;
-    int32_t noisePeak;
+    static constexpr uint32_t MIN_RR_MS = 300;
+    static constexpr uint32_t MAX_RR_MS = 2000;
 
-    int missedBeats;
-    uint32_t lastSampleTime;
-    bool peakDetected;
-    int refractoryTimer;
+    /************************************************
+     * Peak confirmation
+     *
+     * We wait for the MWI to come back down before
+     * confirming the local maximum.
+     ************************************************/
 
-    int32_t lowPassFilter(int32_t sample);
-    int32_t highPassFilter(int32_t sample);
-    int32_t derivative(int32_t sample);
-    int32_t movingWindowIntegral(int32_t sample);
+    static constexpr uint32_t MAX_PEAK_SEARCH_MS = 120;
+
+    float candidatePeakValue;
+    uint32_t candidateStartTime;
+
+    /************************************************
+     * Helpers
+     ************************************************/
+
+    void updateThreshold(float peakValue, bool isSignal);
+
+    bool acceptPeak(uint32_t peakTime);
+
+    float preprocessSample(int32_t sample);
 };
 
 #endif
