@@ -102,6 +102,8 @@ private:
 
     StatsWindow<float, 10> tempStats;
 
+    bool temperatureValid;
+
     /******************************************************
      * Acceleration
      *
