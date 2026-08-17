@@ -93,6 +93,8 @@ HealthEngine::HealthEngine()
 
     moving = false;
 
+    temperatureValid = false;
+
     /******************************************************
      * Wear state
      ******************************************************/
@@ -169,6 +171,10 @@ void HealthEngine::resetPhysiologicalState()
     moving = false;
 
     stepCounter = 0;
+
+    tempStats = StatsWindow<float, 10>();
+    accStats = StatsWindow<float, 100>();
+    temperatureValid = false;
 }
 
 
@@ -364,9 +370,20 @@ void HealthEngine::update(
 
     if (temp.newData && isWorn)
     {
-        tempStats.add(
-            temp.bodyTemperature
-        );
+        if (isfinite(temp.bodyTemperature) &&
+            temp.bodyTemperature >= MIN_VALID_TEMP_C &&
+            temp.bodyTemperature <= MAX_VALID_TEMP_C)
+        {
+            tempStats.add(
+                temp.bodyTemperature
+            );
+            temperatureValid = true;
+        }
+        else
+        {
+            tempStats = StatsWindow<float, 10>();
+            temperatureValid = false;
+        }
     }
 
 
@@ -452,11 +469,19 @@ void HealthEngine::update(
          * Temperature
          **************************************************/
 
-        packet.meanTemp =
-            tempStats.getMean();
+        if (temperatureValid)
+        {
+            packet.meanTemp =
+                tempStats.getMean();
 
-        packet.stdTemp =
-            tempStats.getStdDev();
+            packet.stdTemp =
+                tempStats.getStdDev();
+        }
+        else
+        {
+            packet.meanTemp = NAN;
+            packet.stdTemp = NAN;
+        }
     }
 
     else
