@@ -29,6 +29,9 @@ void QRSDetector::reset()
     lp_y1 = 0.0f;
     lp_y2 = 0.0f;
 
+    previousFiltered = 0.0f;
+    startupTime = 0;
+
     /**********************************************
      * MWI
      **********************************************/
@@ -359,8 +362,6 @@ bool QRSDetector::processSample(
      * Simple first derivative.
      **********************************************/
 
-    static float previousFiltered = 0.0f;
-
     float derivative =
         filtered - previousFiltered;
 
@@ -387,8 +388,6 @@ bool QRSDetector::processSample(
      *
      * First ~1 second is used for noise learning.
      **********************************************/
-
-    static uint32_t startupTime = 0;
 
     if (startupTime == 0)
     {
