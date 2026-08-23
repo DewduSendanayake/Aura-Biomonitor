@@ -136,6 +136,12 @@ HealthEngine::HealthEngine()
 void HealthEngine::resetPhysiologicalState()
 {
     /******************************************************
+     * ECG detector
+     ******************************************************/
+
+    qrs.reset();
+
+    /******************************************************
      * HRV
      ******************************************************/
 
@@ -146,6 +152,8 @@ void HealthEngine::resetPhysiologicalState()
      ******************************************************/
 
     brStats = StatsWindow<float, 5>();
+
+    gravityMagnitude = ACC_COUNTS_PER_G;
 
     respirationSignal = 0.0f;
     previousRespirationSignal = 0.0f;
@@ -193,8 +201,8 @@ void HealthEngine::updateWearState(
      */
 
     bool ecgSaturated =
-        (ecg.ch1 > ECG_SATURATION_THRESHOLD) ||
-        (ecg.ch1 < -ECG_SATURATION_THRESHOLD);
+        (ecg.ch2 > ECG_SATURATION_THRESHOLD) ||
+        (ecg.ch2 < -ECG_SATURATION_THRESHOLD);
 
     /******************************************************
      * Lead OFF
@@ -285,7 +293,7 @@ void HealthEngine::update(
     if (ecg.newData && isWorn && !ecg.leadOff)
     {
         if (qrs.processSample(
-                ecg.ch1,
+                ecg.ch2,
                 timestamp))
         {
             uint32_t rr = qrs.getLastRR();
