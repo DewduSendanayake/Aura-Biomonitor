@@ -11,7 +11,7 @@ public:
     QRSDetector();
 
     // Process one ECG sample.
-    // sample    = raw signed ADS1292R CH2 ECG sample
+    // sample    = raw signed ADS1292R CH1 ECG sample
     // timestamp = timestamp in milliseconds
     //
     // Returns true only when a valid RR interval has been detected.
