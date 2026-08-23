@@ -201,8 +201,8 @@ void HealthEngine::updateWearState(
      */
 
     bool ecgSaturated =
-        (ecg.ch2 > ECG_SATURATION_THRESHOLD) ||
-        (ecg.ch2 < -ECG_SATURATION_THRESHOLD);
+        (ecg.ch1 > ECG_SATURATION_THRESHOLD) ||
+        (ecg.ch1 < -ECG_SATURATION_THRESHOLD);
 
     /******************************************************
      * Lead OFF
@@ -293,7 +293,7 @@ void HealthEngine::update(
     if (ecg.newData && isWorn && !ecg.leadOff)
     {
         if (qrs.processSample(
-                ecg.ch2,
+                ecg.ch1,
                 timestamp))
         {
             uint32_t rr = qrs.getLastRR();
