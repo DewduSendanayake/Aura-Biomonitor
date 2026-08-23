@@ -142,6 +142,11 @@ void loop()
 {
     Scheduler::update();
 
+    if(bleOK)
+    {
+        ble.update();
+    }
+
     sensorPacket.timestamp = millis();
 
     /************************************************
@@ -150,12 +155,11 @@ void loop()
 
     if(ecgOK)
     {
-        if(Scheduler::ECG_Task())
+        // DRDY is the ADS1292R's own 500 Hz schedule. Read as soon as it says
+        // a conversion is ready instead of waiting for a second 500 Hz timer.
+        if(ecg.available())
         {
-            if(ecg.available())
-            {
-                ecg.read(sensorPacket.ecg);
-            }
+            ecg.read(sensorPacket.ecg);
         }
     }
     else
@@ -184,10 +188,12 @@ void loop()
 
     if(tempOK)
     {
+        // Advance the non-blocking DS18B20 conversion every loop. Reading the
+        // finished result remains limited to the configured 1 Hz output rate.
+        temperature.update();
+
         if(Scheduler::TEMP_Task())
         {
-            temperature.update();
-
             temperature.read(sensorPacket.temperature);
         }
     }

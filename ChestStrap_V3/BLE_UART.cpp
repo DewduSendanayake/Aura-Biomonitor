@@ -16,6 +16,8 @@ BLE_UART::BLE_UART()
     txCharacteristic = nullptr;
     rxCharacteristic = nullptr;
     deviceConnected = false;
+    sendOffset = 0;
+    lastChunkTime = 0;
 }
 
 BLE_UART::ServerCallbacks::ServerCallbacks(BLE_UART* ble)
@@ -57,7 +59,43 @@ bool BLE_UART::begin(const String& deviceName)
     return true;
 }
 
-void BLE_UART::update() {}
+void BLE_UART::update()
+{
+    if(!deviceConnected || txCharacteristic == nullptr)
+    {
+        pendingMessage = "";
+        sendOffset = 0;
+        return;
+    }
+
+    if(sendOffset >= pendingMessage.length())
+        return;
+
+    const uint32_t now = millis();
+
+    // Keep the original 2 ms spacing between BLE notifications, but return
+    // to the main loop between chunks so ECG reads are not paused.
+    if(sendOffset > 0 && now - lastChunkTime < 2)
+        return;
+
+    const size_t length =
+        min(BLE_CHUNK_SIZE, pendingMessage.length() - sendOffset);
+
+    String chunk =
+        pendingMessage.substring(sendOffset, sendOffset + length);
+
+    txCharacteristic->setValue(chunk.c_str());
+    txCharacteristic->notify();
+
+    sendOffset += length;
+    lastChunkTime = now;
+
+    if(sendOffset >= pendingMessage.length())
+    {
+        pendingMessage = "";
+        sendOffset = 0;
+    }
+}
 
 bool BLE_UART::connected()
 {
@@ -69,22 +107,11 @@ void BLE_UART::send(const String& message)
     if(!deviceConnected || txCharacteristic == nullptr)
         return;
 
-    String msg = message;
-    if(!msg.endsWith("\n"))
-        msg += "\n";
+    pendingMessage = message;
 
-    // The mobile app already reassembles notifications until it sees '\n'.
-    // Sending fixed-size chunks prevents a long CSV notification from being
-    // truncated on connections that remain at the default 23-byte MTU.
-    for(size_t offset = 0; offset < msg.length(); offset += BLE_CHUNK_SIZE)
-    {
-        if(!deviceConnected)
-            break;
+    if(!pendingMessage.endsWith("\n"))
+        pendingMessage += "\n";
 
-        const size_t length = min(BLE_CHUNK_SIZE, msg.length() - offset);
-        String chunk = msg.substring(offset, offset + length);
-        txCharacteristic->setValue(chunk.c_str());
-        txCharacteristic->notify();
-        delay(2);
-    }
+    sendOffset = 0;
+    lastChunkTime = 0;
 }

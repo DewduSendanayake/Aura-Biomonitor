@@ -11,7 +11,7 @@ public:
     QRSDetector();
 
     // Process one ECG sample.
-    // sample    = raw signed ADS1292R CH1 sample
+    // sample    = raw signed ADS1292R CH1 ECG sample
     // timestamp = timestamp in milliseconds
     //
     // Returns true only when a valid RR interval has been detected.
@@ -49,6 +49,9 @@ private:
     float lp_y2;
 
     float bandPassFilter(float sample);
+
+    float previousFiltered;
+    uint32_t startupTime;
 
     /************************************************
      * QRS processing

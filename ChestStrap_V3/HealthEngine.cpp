@@ -136,6 +136,12 @@ HealthEngine::HealthEngine()
 void HealthEngine::resetPhysiologicalState()
 {
     /******************************************************
+     * ECG detector
+     ******************************************************/
+
+    qrs.reset();
+
+    /******************************************************
      * HRV
      ******************************************************/
 
@@ -146,6 +152,8 @@ void HealthEngine::resetPhysiologicalState()
      ******************************************************/
 
     brStats = StatsWindow<float, 5>();
+
+    gravityMagnitude = ACC_COUNTS_PER_G;
 
     respirationSignal = 0.0f;
     previousRespirationSignal = 0.0f;
