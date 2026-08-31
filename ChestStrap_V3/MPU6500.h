@@ -33,7 +33,9 @@ private:
 
     uint8_t readRegister(uint8_t reg);
 
-    bool readSensor();
+    int16_t read16(uint8_t reg);
+
+    void readSensor();
 };
 
 #endif

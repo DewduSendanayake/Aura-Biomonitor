@@ -102,8 +102,6 @@ private:
 
     StatsWindow<float, 10> tempStats;
 
-    bool temperatureValid;
-
     /******************************************************
      * Acceleration
      *
@@ -113,12 +111,16 @@ private:
     StatsWindow<float, 100> accStats;
 
     /******************************************************
-     * Respiration
+     * Respiration (ADS1292R Channel 1 - 500 Hz)
      *
-     * Orientation-independent acceleration magnitude
+     * Thoracic impedance pneumography with Peak-to-Peak detection
      ******************************************************/
 
-    float gravityMagnitude;
+    bool respInitialized;
+
+    float respLP;
+
+    float respBaseline;
 
     float respirationSignal;
 
@@ -126,15 +128,15 @@ private:
 
     float respirationPeak;
 
-    float respirationNoise;
+    float respirationTrough;
 
-    float respirationThreshold;
+    float adaptiveP2P;
 
-    bool respirationAboveThreshold;
-
-    uint32_t respirationCandidateTime;
+    bool isRising;
 
     uint32_t respirationPeakTime;
+
+    uint32_t respirationTroughTime;
 
     uint32_t lastBreathTime;
 
@@ -159,7 +161,7 @@ private:
      ******************************************************/
 
     void detectRespiration(
-        const IMUData& imu,
+        int32_t respSample,
         uint32_t timestamp
     );
 

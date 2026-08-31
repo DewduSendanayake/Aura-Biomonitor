@@ -11,7 +11,7 @@ public:
     QRSDetector();
 
     // Process one ECG sample.
-    // sample    = raw signed ADS1292R CH1 ECG sample
+    // sample    = raw signed ADS1292R CH2 sample (ECG channel)
     // timestamp = timestamp in milliseconds
     //
     // Returns true only when a valid RR interval has been detected.
@@ -38,6 +38,8 @@ private:
      * 15 Hz low-pass
      ************************************************/
 
+    bool filterInitialized;
+
     float hp_x1;
     float hp_x2;
     float hp_y1;
@@ -48,16 +50,17 @@ private:
     float lp_y1;
     float lp_y2;
 
-    float bandPassFilter(float sample);
-
     float previousFiltered;
-    uint32_t startupTime;
+
+    float bandPassFilter(float sample);
 
     /************************************************
      * QRS processing
+     *
+     * 75 samples @ 500 Hz = 150 ms window
      ************************************************/
 
-    static constexpr int MWI_SIZE = 15;
+    static constexpr int MWI_SIZE = 75;
 
     float mwiBuffer[MWI_SIZE];
     int mwiIndex;
@@ -69,19 +72,21 @@ private:
      * Adaptive threshold
      ************************************************/
 
+    static constexpr float MIN_THRESHOLD = 0.05f;
+
     float signalPeak;
     float noisePeak;
     float threshold;
 
+    uint32_t startupTime;
     bool initialized;
 
     /************************************************
      * Peak detection
      ************************************************/
 
-    float previousMWI;
-    float currentMWI;
-    float nextMWI;
+    float previousMWISample;
+    float mwiLocalPeak;
 
     uint32_t candidatePeakTime;
 
@@ -118,7 +123,8 @@ private:
      * confirming the local maximum.
      ************************************************/
 
-    static constexpr uint32_t MAX_PEAK_SEARCH_MS = 120;
+    static constexpr uint32_t MIN_PEAK_SEARCH_MS = 20;
+    static constexpr uint32_t MAX_PEAK_SEARCH_MS = 250;
 
     float candidatePeakValue;
     uint32_t candidateStartTime;

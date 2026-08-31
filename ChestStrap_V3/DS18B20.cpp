@@ -57,21 +57,7 @@ void DS18B20::update()
 
     if (millis() - lastRequestTime >= 800)
     {
-        float temperature = sensors.getTempCByIndex(0);
-
-        if (isfinite(temperature) &&
-            temperature >= MIN_VALID_TEMP_C &&
-            temperature <= MAX_VALID_TEMP_C)
-        {
-            tempData.bodyTemperature = temperature;
-        }
-        else
-        {
-            // Preserve the sample boundary but make the bad value explicit.
-            // HealthEngine clears its temperature window and the mobile app
-            // rejects this packet instead of treating a fault as physiology.
-            tempData.bodyTemperature = NAN;
-        }
+        tempData.bodyTemperature = sensors.getTempCByIndex(0);
 
         tempData.newData = true;
 

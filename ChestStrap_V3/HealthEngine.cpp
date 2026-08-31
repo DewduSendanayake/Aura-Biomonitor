@@ -32,50 +32,47 @@ static constexpr int32_t ECG_SATURATION_THRESHOLD = 7500000;
  * 100 samples ≈ 200 ms
  */
 
-static constexpr uint16_t OFF_BODY_LIMIT = 100;
+static constexpr uint16_t OFF_BODY_LIMIT = 1500;
 
 /*
- * Require approximately 20 ms of good signal
+ * Require approximately 100 ms of good signal (50 samples)
  * before declaring the strap worn again.
  */
 
-static constexpr uint16_t ON_BODY_LIMIT = 10;
+static constexpr uint16_t ON_BODY_LIMIT = 50;
 
 
 /**********************************************************
- * Respiration
+ * Respiration (ADS1292R Channel 1 at 500 Hz)
  **********************************************************/
 
 /*
- * IMU is sampled at 100 Hz.
+ * Respiration low-pass filter:
+ * Cutoff fc ~ 1.0 Hz at Fs = 500 Hz.
+ * alpha = 2 * pi * fc / Fs ≈ 0.0125
+ * Removes 50/60 Hz line noise, EMG, and ECG QRS bleed-through.
  */
-
-static constexpr float GRAVITY_ALPHA = 0.02f;
+static constexpr float RESP_LP_ALPHA = 0.0125f;
 
 /*
- * Respiration signal smoothing.
- *
- * This is a simple low-pass stage after gravity removal.
+ * DC baseline impedance tracking filter:
+ * Cutoff fc ~ 0.008 Hz at Fs = 500 Hz.
+ * alpha = 0.0001f (tau ~ 20 s) preserves respiratory frequencies
+ * (0.1 to 0.7 Hz / 6 to 42 bpm) without canceling natural breaths.
  */
-
-static constexpr float RESP_ALPHA = 0.08f;
+static constexpr float RESP_BASELINE_ALPHA = 0.0001f;
 
 /*
  * Minimum time between breaths.
- *
  * 1.5 seconds corresponds to 40 breaths/min.
- *
  * This prevents multiple detections from one breath.
  */
-
 static constexpr uint32_t MIN_BREATH_INTERVAL_MS = 1500;
 
 /*
  * Maximum physiologically useful interval.
- *
  * 15 seconds = 4 breaths/min.
  */
-
 static constexpr uint32_t MAX_BREATH_INTERVAL_MS = 15000;
 
 
@@ -93,8 +90,6 @@ HealthEngine::HealthEngine()
 
     moving = false;
 
-    temperatureValid = false;
-
     /******************************************************
      * Wear state
      ******************************************************/
@@ -102,26 +97,28 @@ HealthEngine::HealthEngine()
     isWorn = false;
     wasWorn = false;
 
-    offBodyCount = 500;
+    offBodyCount = OFF_BODY_LIMIT;
 
     /******************************************************
      * Respiration state
      ******************************************************/
 
-    gravityMagnitude = ACC_COUNTS_PER_G;
+    respInitialized = false;
+
+    respLP = 0.0f;
+    respBaseline = 0.0f;
 
     respirationSignal = 0.0f;
     previousRespirationSignal = 0.0f;
 
     respirationPeak = 0.0f;
-    respirationNoise = 0.0f;
+    respirationTrough = 0.0f;
+    adaptiveP2P = 1.0f;
 
-    respirationThreshold = 0.0f;
+    isRising = true;
 
-    respirationAboveThreshold = false;
-
-    respirationCandidateTime = 0;
     respirationPeakTime = 0;
+    respirationTroughTime = 0;
 
     lastBreathTime = 0;
 
@@ -136,7 +133,7 @@ HealthEngine::HealthEngine()
 void HealthEngine::resetPhysiologicalState()
 {
     /******************************************************
-     * ECG detector
+     * QRS
      ******************************************************/
 
     qrs.reset();
@@ -153,20 +150,22 @@ void HealthEngine::resetPhysiologicalState()
 
     brStats = StatsWindow<float, 5>();
 
-    gravityMagnitude = ACC_COUNTS_PER_G;
+    respInitialized = false;
+
+    respLP = 0.0f;
+    respBaseline = 0.0f;
 
     respirationSignal = 0.0f;
     previousRespirationSignal = 0.0f;
 
     respirationPeak = 0.0f;
-    respirationNoise = 0.0f;
+    respirationTrough = 0.0f;
+    adaptiveP2P = 1.0f;
 
-    respirationThreshold = 0.0f;
+    isRising = true;
 
-    respirationAboveThreshold = false;
-
-    respirationCandidateTime = 0;
     respirationPeakTime = 0;
+    respirationTroughTime = 0;
 
     lastBreathTime = 0;
 
@@ -179,10 +178,6 @@ void HealthEngine::resetPhysiologicalState()
     moving = false;
 
     stepCounter = 0;
-
-    tempStats = StatsWindow<float, 10>();
-    accStats = StatsWindow<float, 100>();
-    temperatureValid = false;
 }
 
 
@@ -197,12 +192,12 @@ void HealthEngine::updateWearState(
         return;
 
     /*
-     * Check ECG saturation.
+     * Check ECG saturation on Channel 2 (ECG channel).
      */
 
     bool ecgSaturated =
-        (ecg.ch1 > ECG_SATURATION_THRESHOLD) ||
-        (ecg.ch1 < -ECG_SATURATION_THRESHOLD);
+        (ecg.ch2 > ECG_SATURATION_THRESHOLD) ||
+        (ecg.ch2 < -ECG_SATURATION_THRESHOLD);
 
     /******************************************************
      * Lead OFF
@@ -210,7 +205,7 @@ void HealthEngine::updateWearState(
 
     if (ecg.leadOff)
     {
-        if (offBodyCount < 500)
+        if (offBodyCount < 3000)
             offBodyCount++;
 
         if (offBodyCount >= OFF_BODY_LIMIT)
@@ -233,7 +228,7 @@ void HealthEngine::updateWearState(
 
         if (ecgSaturated)
         {
-            if (offBodyCount < 30)
+            if (offBodyCount < 100)
                 offBodyCount++;
         }
         else
@@ -279,21 +274,19 @@ void HealthEngine::update(
 
 
     /******************************************************
-     * 2. ECG / HRV
+     * 2. ADS1292R Acquisition (500 Hz)
      *
-     * IMPORTANT:
+     * Channel 2 = ECG / HRV
+     * Channel 1 = Respiration Impedance Pneumography
      *
-     * Only process ECG for HR when the electrodes are
-     * actually connected.
-     *
-     * This prevents putting-on / removing the strap from
-     * generating false RR intervals.
+     * Only process when the electrodes are attached and worn.
      ******************************************************/
 
     if (ecg.newData && isWorn && !ecg.leadOff)
     {
+        // 2a. ECG / QRS detection on Channel 2
         if (qrs.processSample(
-                ecg.ch1,
+                ecg.ch2,
                 timestamp))
         {
             uint32_t rr = qrs.getLastRR();
@@ -312,29 +305,22 @@ void HealthEngine::update(
                 );
             }
         }
+
+        // 2b. Respiration detection on Channel 1 (ADS1292R Impedance)
+        detectRespiration(
+            ecg.ch1,
+            timestamp
+        );
     }
 
 
     /******************************************************
-     * 3. IMU
+     * 3. IMU (100 Hz)
      ******************************************************/
 
     if (imu.newData)
     {
         detectMotion(imu);
-
-        /*
-         * Respiration can only be useful when the strap
-         * is worn.
-         */
-
-        if (isWorn)
-        {
-            detectRespiration(
-                imu,
-                timestamp
-            );
-        }
 
         /**************************************************
          * Acceleration magnitude
@@ -378,20 +364,9 @@ void HealthEngine::update(
 
     if (temp.newData && isWorn)
     {
-        if (isfinite(temp.bodyTemperature) &&
-            temp.bodyTemperature >= MIN_VALID_TEMP_C &&
-            temp.bodyTemperature <= MAX_VALID_TEMP_C)
-        {
-            tempStats.add(
-                temp.bodyTemperature
-            );
-            temperatureValid = true;
-        }
-        else
-        {
-            tempStats = StatsWindow<float, 10>();
-            temperatureValid = false;
-        }
+        tempStats.add(
+            temp.bodyTemperature
+        );
     }
 
 
@@ -477,19 +452,11 @@ void HealthEngine::update(
          * Temperature
          **************************************************/
 
-        if (temperatureValid)
-        {
-            packet.meanTemp =
-                tempStats.getMean();
+        packet.meanTemp =
+            tempStats.getMean();
 
-            packet.stdTemp =
-                tempStats.getStdDev();
-        }
-        else
-        {
-            packet.meanTemp = NAN;
-            packet.stdTemp = NAN;
-        }
+        packet.stdTemp =
+            tempStats.getStdDev();
     }
 
     else
@@ -526,223 +493,156 @@ void HealthEngine::update(
 
 
 /**********************************************************
- * Respiration detection
+ * Respiration detection (ADS1292R Channel 1 at 500 Hz)
+ *
+ * Channel 1 provides thoracic impedance pneumography data.
+ * Breathing modulates this impedance (0.1 to 0.7 Hz).
  **********************************************************/
 
 void HealthEngine::detectRespiration(
-    const IMUData& imu,
+    int32_t respSample,
     uint32_t timestamp)
 {
     /******************************************************
-     * 1. Calculate acceleration magnitude
-     *
-     * This removes dependence on sensor orientation.
-     *
-     * Instead of:
-     *
-     *     az
-     *
-     * we use:
-     *
-     *     sqrt(ax² + ay² + az²)
+     * 1. Scale 24-bit raw impedance sample
      ******************************************************/
 
-    float ax = (float)imu.ax;
-    float ay = (float)imu.ay;
-    float az = (float)imu.az;
-
-    float magnitude =
-        sqrt(
-            ax * ax +
-            ay * ay +
-            az * az
-        );
-
+    float raw = (float)respSample / 1024.0f;
 
     /******************************************************
-     * 2. Estimate gravity
-     *
-     * Gravity changes slowly.
-     *
-     * Respiration is a smaller dynamic variation around
-     * the gravity vector.
+     * 2. Initialize filter state on first sample
      ******************************************************/
 
-    gravityMagnitude =
-        gravityMagnitude +
-        GRAVITY_ALPHA *
-        (magnitude - gravityMagnitude);
-
-
-    /******************************************************
-     * 3. Remove gravity
-     ******************************************************/
-
-    float dynamicAcceleration =
-        magnitude -
-        gravityMagnitude;
-
-
-    /******************************************************
-     * 4. Low-pass respiration signal
-     ******************************************************/
-
-    respirationSignal =
-        respirationSignal +
-        RESP_ALPHA *
-        (dynamicAcceleration -
-         respirationSignal);
-
-
-    /******************************************************
-     * 5. Estimate signal amplitude
-     ******************************************************/
-
-    float absoluteSignal =
-        fabs(respirationSignal);
-
-
-    /******************************************************
-     * Adaptive noise estimate
-     ******************************************************/
-
-    if (absoluteSignal <
-        respirationThreshold)
+    if (!respInitialized)
     {
-        respirationNoise =
-            0.995f * respirationNoise +
-            0.005f * absoluteSignal;
-    }
-
-
-    /******************************************************
-     * Adaptive respiration threshold
-     ******************************************************/
-
-    float estimatedThreshold =
-        respirationNoise * 3.0f;
-
-    /*
-     * Minimum threshold prevents tiny sensor noise
-     * from being detected as breathing.
-     */
-
-    const float MIN_THRESHOLD = 10.0f;
-
-    if (estimatedThreshold < MIN_THRESHOLD)
-        estimatedThreshold = MIN_THRESHOLD;
-
-    respirationThreshold =
-        estimatedThreshold;
-
-
-    /******************************************************
-     * Positive respiration peak
-     ******************************************************/
-
-    bool above =
-        respirationSignal >
-        respirationThreshold;
-
-
-    /******************************************************
-     * Start of respiration event
-     ******************************************************/
-
-    if (above && !respirationAboveThreshold)
-    {
-        respirationAboveThreshold = true;
-
-        respirationCandidateTime =
-            timestamp;
-
-        respirationPeakTime =
-            timestamp;
-
-        respirationPeak =
-            respirationSignal;
-    }
-
-
-    /******************************************************
-     * Continue tracking current respiration peak
-     ******************************************************/
-
-    if (above &&
-        respirationAboveThreshold)
-    {
-        if (respirationSignal >
-            respirationPeak)
-        {
-            respirationPeak =
-                respirationSignal;
-
-            respirationPeakTime =
-                timestamp;
-        }
-    }
-
-
-    /******************************************************
-     * Respiration event finished
-     ******************************************************/
-
-    if (!above &&
-        respirationAboveThreshold)
-    {
-        respirationAboveThreshold = false;
-
-        uint32_t breathTime =
-            respirationPeakTime;
-
-
-        /**************************************************
-         * First breath establishes timing.
-         **************************************************/
-
-        if (!hasFirstBreath)
-        {
-            lastBreathTime =
-                breathTime;
-
-            hasFirstBreath = true;
-        }
-
-        else
-        {
-            uint32_t interval =
-                breathTime -
-                lastBreathTime;
-
-
-            /**********************************************
-             * Validate breath interval
-             **********************************************/
-
-            if (interval >=
-                    MIN_BREATH_INTERVAL_MS &&
-                interval <=
-                    MAX_BREATH_INTERVAL_MS)
-            {
-                brStats.add(
-                    (float)interval
-                );
-
-                lastBreathTime =
-                    breathTime;
-            }
-        }
-
-
+        respLP = raw;
+        respBaseline = raw;
+        respirationSignal = 0.0f;
+        previousRespirationSignal = 0.0f;
         respirationPeak = 0.0f;
-
-        respirationCandidateTime = 0;
-        respirationPeakTime = 0;
+        respirationTrough = 0.0f;
+        adaptiveP2P = 1.0f;
+        isRising = true;
+        respirationPeakTime = timestamp;
+        respirationTroughTime = timestamp;
+        respInitialized = true;
+        return;
     }
 
+    /******************************************************
+     * 3. Low-pass filter (fc ~ 1.0 Hz at 500 Hz)
+     *
+     * Removes 50/60 Hz mains interference, muscle EMG,
+     * and ECG QRS spikes that bleed into impedance.
+     ******************************************************/
 
-    previousRespirationSignal =
-        respirationSignal;
+    respLP += RESP_LP_ALPHA * (raw - respLP);
+
+    /******************************************************
+     * 4. DC baseline tracking (fc ~ 0.008 Hz at 500 Hz)
+     *
+     * alpha = 0.0001f preserves respiratory frequencies
+     * without canceling natural slow/deep breaths.
+     ******************************************************/
+
+    respBaseline += RESP_BASELINE_ALPHA * (respLP - respBaseline);
+
+    /******************************************************
+     * 5. Dynamic respiration signal
+     *
+     * Zero-mean respiratory waveform.
+     ******************************************************/
+
+    respirationSignal = respLP - respBaseline;
+
+    /******************************************************
+     * 6. Peak-to-Peak Amplitude & Extrema Detection
+     *
+     * Detects breath cycles by tracking trough-to-peak
+     * and peak-to-trough transitions with adaptive
+     * amplitude thresholding and hysteresis.
+     ******************************************************/
+
+    // Hysteresis threshold to confirm direction change (prevents noise ripple)
+    float hysteresis = 0.25f * adaptiveP2P;
+    if (hysteresis < 0.10f)
+        hysteresis = 0.10f;
+
+    // Minimum peak-to-peak amplitude required for a valid breath
+    float minP2P = 0.35f * adaptiveP2P;
+    if (minP2P < 0.15f)
+        minP2P = 0.15f;
+
+    if (isRising)
+    {
+        // Track local maximum during rising phase
+        if (respirationSignal > respirationPeak)
+        {
+            respirationPeak = respirationSignal;
+            respirationPeakTime = timestamp;
+        }
+
+        // Peak confirmed when signal drops below (peak - hysteresis)
+        if (respirationSignal < (respirationPeak - hysteresis))
+        {
+            float p2p = respirationPeak - respirationTrough;
+
+            if (p2p >= minP2P)
+            {
+                uint32_t breathTime = respirationPeakTime;
+
+                if (!hasFirstBreath)
+                {
+                    lastBreathTime = breathTime;
+                    hasFirstBreath = true;
+                }
+                else
+                {
+                    uint32_t interval = breathTime - lastBreathTime;
+
+                    if (interval >= MIN_BREATH_INTERVAL_MS &&
+                        interval <= MAX_BREATH_INTERVAL_MS)
+                    {
+                        brStats.add((float)interval);
+                        lastBreathTime = breathTime;
+
+                        // Adapt amplitude estimate
+                        adaptiveP2P = 0.2f * p2p + 0.8f * adaptiveP2P;
+                    }
+                    else if (interval > MAX_BREATH_INTERVAL_MS)
+                    {
+                        // Re-anchor timing on prolonged pause or deep breath
+                        lastBreathTime = breathTime;
+                    }
+                }
+            }
+
+            // Switch to falling phase
+            isRising = false;
+            respirationTrough = respirationSignal;
+            respirationTroughTime = timestamp;
+        }
+    }
+    else
+    {
+        // Track local minimum during falling phase
+        if (respirationSignal < respirationTrough)
+        {
+            respirationTrough = respirationSignal;
+            respirationTroughTime = timestamp;
+        }
+
+        // Trough confirmed when signal rises above (trough + hysteresis)
+        if (respirationSignal > (respirationTrough + hysteresis))
+        {
+            // Switch to rising phase
+            isRising = true;
+            respirationPeak = respirationSignal;
+            respirationPeakTime = timestamp;
+        }
+    }
+
+    previousRespirationSignal = respirationSignal;
 }
 
 

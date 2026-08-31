@@ -8,7 +8,7 @@
  **********************************************************/
 
 #define FW_NAME        "Chest Strap V3"
-#define FW_VERSION     "1.0.4"
+#define FW_VERSION     "1.0.2"
 
 /**********************************************************
  *                     Debug
@@ -58,11 +58,6 @@
  **********************************************************/
 
 #define TEMP_PIN             2
-
-// Broad sensor-quality limits. These reject DS18B20 fault sentinels such as
-// -127 C and 85 C without treating the limits as medical thresholds.
-#define MIN_VALID_TEMP_C    10.0f
-#define MAX_VALID_TEMP_C    45.0f
 
 /**********************************************************
  *                Off-Body Detection

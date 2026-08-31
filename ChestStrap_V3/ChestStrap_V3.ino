@@ -16,11 +16,11 @@
 #include "Scheduler.h"
 
 #include "ADS1292R.h"
-#include "MPU6500.h"
 #include "DS18B20.h"
+#include "MPU6500.h"
 
-#include "HealthEngine.h"
 #include "BLE_UART.h"
+#include "HealthEngine.h"
 
 #include "CRC.h"
 #include "Utils.h"
@@ -61,186 +61,158 @@ bool bleOK = false;
  * Setup
  **********************************************************/
 
-void setup()
-{
-    DBG_BEGIN(115200);
+void setup() {
+  DBG_BEGIN(115200);
 
-    delay(1500);
+  delay(1500);
 
-    DBG_PRINTLN();
-    DBG_PRINTLN("=================================");
-    DBG_PRINTLN(FW_NAME);
-    DBG_PRINT("Firmware : ");
-    DBG_PRINTLN(FW_VERSION);
-    DBG_PRINTLN("=================================");
-    DBG_PRINTLN();
+  DBG_PRINTLN();
+  DBG_PRINTLN("=================================");
+  DBG_PRINTLN(FW_NAME);
+  DBG_PRINT("Firmware : ");
+  DBG_PRINTLN(FW_VERSION);
+  DBG_PRINTLN("=================================");
+  DBG_PRINTLN();
 
-    Scheduler::begin();
+  Scheduler::begin();
 
-    /************************************************
-     * ADS1292R
-     ************************************************/
+  /************************************************
+   * ADS1292R
+   ************************************************/
 
-    DBG_PRINT("Initializing ADS1292R... ");
+  DBG_PRINT("Initializing ADS1292R... ");
 
-    ecgOK = ecg.begin();
+  ecgOK = ecg.begin();
 
-    if(ecgOK)
-        DBG_PRINTLN("OK");
-    else
-        DBG_PRINTLN("FAILED");
+  if (ecgOK)
+    DBG_PRINTLN("OK");
+  else
+    DBG_PRINTLN("FAILED");
 
-    /************************************************
-     * MPU6500
-     ************************************************/
+  /************************************************
+   * MPU6500
+   ************************************************/
 
-    DBG_PRINT("Initializing MPU6500... ");
+  DBG_PRINT("Initializing MPU6500... ");
 
-    imuOK = imu.begin();
+  imuOK = imu.begin();
 
-    if(imuOK)
-        DBG_PRINTLN("OK");
-    else
-        DBG_PRINTLN("FAILED");
+  if (imuOK)
+    DBG_PRINTLN("OK");
+  else
+    DBG_PRINTLN("FAILED");
 
-    /************************************************
-     * DS18B20
-     ************************************************/
+  /************************************************
+   * DS18B20
+   ************************************************/
 
-    DBG_PRINT("Initializing DS18B20... ");
+  DBG_PRINT("Initializing DS18B20... ");
 
-    tempOK = temperature.begin();
+  tempOK = temperature.begin();
 
-    if(tempOK)
-        DBG_PRINTLN("OK");
-    else
-        DBG_PRINTLN("FAILED");
+  if (tempOK)
+    DBG_PRINTLN("OK");
+  else
+    DBG_PRINTLN("FAILED");
 
-    /************************************************
-     * BLE
-     ************************************************/
+  /************************************************
+   * BLE
+   ************************************************/
 
-    DBG_PRINT("Initializing BLE... ");
+  DBG_PRINT("Initializing BLE... ");
 
-    bleOK = ble.begin("ChestStrap_V3");
+  bleOK = ble.begin("ChestStrap_V3");
 
-    if(bleOK)
-        DBG_PRINTLN("OK");
-    else
-        DBG_PRINTLN("FAILED");
+  if (bleOK)
+    DBG_PRINTLN("OK");
+  else
+    DBG_PRINTLN("FAILED");
 
-    DBG_PRINTLN();
-    DBG_PRINTLN("System Ready");
-    DBG_PRINTLN();
+  DBG_PRINTLN();
+  DBG_PRINTLN("System Ready");
+  DBG_PRINTLN();
 }
 
 /**********************************************************
  * Loop
  **********************************************************/
 
-void loop()
-{
-    Scheduler::update();
+void loop() {
+  Scheduler::update();
 
-    if(bleOK)
-    {
-        ble.update();
+  sensorPacket.timestamp = millis();
+
+  /************************************************
+   * ECG
+   ************************************************/
+
+  if (ecgOK) {
+    if (ecg.available()) {
+      ecg.read(sensorPacket.ecg);
     }
+  } else {
+    // ECG hardware not available - treat as lead-off.
+    sensorPacket.ecg.leadOff = true;
+  }
 
-    sensorPacket.timestamp = millis();
+  /************************************************
+   * IMU
+   ************************************************/
 
-    /************************************************
-     * ECG
-     ************************************************/
+  if (imuOK) {
+    if (Scheduler::IMU_Task()) {
+      imu.update();
 
-    if(ecgOK)
-    {
-        // DRDY is the ADS1292R's own 500 Hz schedule. Read as soon as it says
-        // a conversion is ready instead of waiting for a second 500 Hz timer.
-        if(ecg.available())
-        {
-            ecg.read(sensorPacket.ecg);
-        }
+      imu.read(sensorPacket.imu);
     }
-    else
-    {
-        // ECG hardware not available - treat as lead-off.
-        sensorPacket.ecg.leadOff = true;
+  }
+
+  /************************************************
+   * Temperature
+   ************************************************/
+
+  if (tempOK) {
+    if (Scheduler::TEMP_Task()) {
+      temperature.update();
+
+      temperature.read(sensorPacket.temperature);
     }
+  }
 
-    /************************************************
-     * IMU
-     ************************************************/
+  /************************************************
+   * Packet
+   ************************************************/
 
-    if(imuOK)
-    {
-        if(Scheduler::IMU_Task())
-        {
-            imu.update();
+  health.update(sensorPacket.ecg, sensorPacket.imu, sensorPacket.temperature,
+                sensorPacket.timestamp);
 
-            imu.read(sensorPacket.imu);
-        }
+  sensorPacket.ecg.newData = false;
+  sensorPacket.imu.newData = false;
+  sensorPacket.temperature.newData = false;
+
+  /************************************************
+   * Serial Debug
+   ************************************************/
+
+  if (Scheduler::BLE_Task()) {
+    // ADS1292R status format:
+    // 1100 + LOFF_STAT[4:0] + GPIO[1:0] + 13 zero bits.
+    const uint8_t loffStat =
+        (uint8_t)(((sensorPacket.ecg.status[0] & 0x0F) << 1) |
+                  ((sensorPacket.ecg.status[1] >> 7) & 0x01));
+
+    DBG_PRINTF(
+        "ST: %02X %02X %02X | LOFFSTAT:%02X | LOFF:%d | CH1:%ld | CH2:%ld\r\n",
+        sensorPacket.ecg.status[0], sensorPacket.ecg.status[1],
+        sensorPacket.ecg.status[2], loffStat, sensorPacket.ecg.leadOff ? 1 : 0,
+        (long)sensorPacket.ecg.ch1, (long)sensorPacket.ecg.ch2);
+
+    String csv = health.toCSV();
+
+    DBG_PRINT(csv);
+
+    if (ble.connected()) {
+      ble.send(csv);
     }
-
-    /************************************************
-     * Temperature
-     ************************************************/
-
-    if(tempOK)
-    {
-        // Advance the non-blocking DS18B20 conversion every loop. Reading the
-        // finished result remains limited to the configured 1 Hz output rate.
-        temperature.update();
-
-        if(Scheduler::TEMP_Task())
-        {
-            temperature.read(sensorPacket.temperature);
-        }
-    }
-
-    /************************************************
-     * Packet
-     ************************************************/
-
-    health.update(
-            sensorPacket.ecg,
-            sensorPacket.imu,
-            sensorPacket.temperature,
-            sensorPacket.timestamp);
-
-    sensorPacket.ecg.newData = false;
-    sensorPacket.imu.newData = false;
-    sensorPacket.temperature.newData = false;
-
-    /************************************************
-     * Serial Debug
-     ************************************************/
-
-    if(Scheduler::BLE_Task())
-    {
-        // ADS1292R status format:
-        // 1100 + LOFF_STAT[4:0] + GPIO[1:0] + 13 zero bits.
-        const uint8_t loffStat =
-            (uint8_t)(((sensorPacket.ecg.status[0] & 0x0F) << 1) |
-                      ((sensorPacket.ecg.status[1] >> 7) & 0x01));
-
-        DBG_PRINTF(
-            "ST: %02X %02X %02X | LOFFSTAT:%02X | LOFF:%d | CH1:%ld | CH2:%ld\r\n",
-            sensorPacket.ecg.status[0],
-            sensorPacket.ecg.status[1],
-            sensorPacket.ecg.status[2],
-            loffStat,
-            sensorPacket.ecg.leadOff ? 1 : 0,
-            (long)sensorPacket.ecg.ch1,
-            (long)sensorPacket.ecg.ch2);
-
-        String csv = health.toCSV();
-
-        DBG_PRINT(csv);
-
-        if(ble.connected())
-        {
-            ble.send(csv);
-        }
-    }
+  }
 }

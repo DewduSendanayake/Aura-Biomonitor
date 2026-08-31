@@ -10,7 +10,6 @@
 #define PWR_MGMT_2     0x6C
 
 #define ACCEL_CONFIG   0x1C
-#define ACCEL_CONFIG2  0x1D
 #define GYRO_CONFIG    0x1B
 
 #define CONFIG         0x1A
@@ -45,18 +44,13 @@ bool MPU6500::begin()
 
     delay(100);
 
-    // Gyroscope DLPF = 41 Hz.
+    // DLPF = 41Hz
 
     writeRegister(CONFIG,0x03);
 
     // ±2g
 
     writeRegister(ACCEL_CONFIG,0x00);
-
-    // Accelerometer DLPF = 41 Hz. This is a separate register from the
-    // gyroscope filter above, and the accelerometer is the signal used by
-    // motion and the current respiration estimator.
-    writeRegister(ACCEL_CONFIG2,0x03);
 
     // ±250°/s
 
@@ -102,9 +96,6 @@ bool MPU6500::read(IMUData &data)
     if(!initialized)
         return false;
 
-    if(!imuData.newData)
-        return false;
-
     data = imuData;
 
     imuData.newData = false;
@@ -114,56 +105,19 @@ bool MPU6500::read(IMUData &data)
 
 /************************************************/
 
-bool MPU6500::readSensor()
+void MPU6500::readSensor()
 {
-    // Read the complete sensor block in one transaction. The old code made
-    // seven separate I2C reads, so axes from different update moments could
-    // be combined into one motion sample.
-    Wire.beginTransmission(MPU6500_ADDRESS);
-    Wire.write(ACCEL_XOUT_H);
+    imuData.ax = read16(ACCEL_XOUT_H);
+    imuData.ay = read16(ACCEL_XOUT_H+2);
+    imuData.az = read16(ACCEL_XOUT_H+4);
 
-    if(Wire.endTransmission(false) != 0)
-        return false;
+    imuData.temperature = read16(TEMP_OUT_H);
 
-    const uint8_t bytesRequested = 14;
-    const uint8_t bytesReceived =
-        Wire.requestFrom(MPU6500_ADDRESS, bytesRequested);
-
-    if(bytesReceived != bytesRequested ||
-       Wire.available() < bytesRequested)
-    {
-        while(Wire.available())
-            Wire.read();
-
-        return false;
-    }
-
-    uint8_t raw[14];
-
-    for(uint8_t i = 0; i < bytesRequested; i++)
-        raw[i] = (uint8_t)Wire.read();
-
-    auto readSigned16 = [&raw](uint8_t index) -> int16_t
-    {
-        return (int16_t)(
-            ((uint16_t)raw[index] << 8) |
-            (uint16_t)raw[index + 1]
-        );
-    };
-
-    imuData.ax = readSigned16(0);
-    imuData.ay = readSigned16(2);
-    imuData.az = readSigned16(4);
-
-    imuData.temperature = readSigned16(6);
-
-    imuData.gx = readSigned16(8);
-    imuData.gy = readSigned16(10);
-    imuData.gz = readSigned16(12);
+    imuData.gx = read16(GYRO_XOUT_H);
+    imuData.gy = read16(GYRO_XOUT_H+2);
+    imuData.gz = read16(GYRO_XOUT_H+4);
 
     imuData.newData = true;
-
-    return true;
 }
 
 /************************************************/
@@ -195,4 +149,23 @@ uint8_t MPU6500::readRegister(uint8_t reg)
         return Wire.read();
 
     return 0xFF;
+}
+
+/************************************************/
+
+int16_t MPU6500::read16(uint8_t reg)
+{
+    Wire.beginTransmission(MPU6500_ADDRESS);
+
+    Wire.write(reg);
+
+    Wire.endTransmission(false);
+
+    Wire.requestFrom(MPU6500_ADDRESS,(uint8_t)2);
+
+    int16_t value = ((int16_t)Wire.read()<<8);
+
+    value |= Wire.read();
+
+    return value;
 }

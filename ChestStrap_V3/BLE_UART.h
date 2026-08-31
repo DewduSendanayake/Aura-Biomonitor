@@ -34,10 +34,6 @@ private:
 
     bool deviceConnected;
 
-    String pendingMessage;
-    size_t sendOffset;
-    uint32_t lastChunkTime;
-
     class ServerCallbacks : public BLEServerCallbacks
     {
     public:

@@ -19,6 +19,8 @@ void QRSDetector::reset()
      * Filter states
      **********************************************/
 
+    filterInitialized = false;
+
     hp_x1 = 0.0f;
     hp_x2 = 0.0f;
     hp_y1 = 0.0f;
@@ -30,7 +32,6 @@ void QRSDetector::reset()
     lp_y2 = 0.0f;
 
     previousFiltered = 0.0f;
-    startupTime = 0;
 
     /**********************************************
      * MWI
@@ -50,17 +51,17 @@ void QRSDetector::reset()
 
     signalPeak = 0.0f;
     noisePeak = 0.0f;
-    threshold = 0.0f;
+    threshold = MIN_THRESHOLD;
 
+    startupTime = 0;
     initialized = false;
 
     /**********************************************
      * Peak detection
      **********************************************/
 
-    previousMWI = 0.0f;
-    currentMWI = 0.0f;
-    nextMWI = 0.0f;
+    previousMWISample = 0.0f;
+    mwiLocalPeak = 0.0f;
 
     candidatePeakTime = 0;
     candidatePeakValue = 0.0f;
@@ -157,14 +158,26 @@ float QRSDetector::preprocessSample(int32_t sample)
 {
     /*
      * The ADS1292R produces a 24-bit signed value.
-     *
-     * Scale it down before floating-point processing.
-     *
-     * This does NOT affect RR timing because the
-     * detector uses adaptive thresholds.
+     * Scale down before floating-point processing.
      */
 
     float x = (float)sample / 1024.0f;
+
+    if (!filterInitialized)
+    {
+        hp_x1 = x;
+        hp_x2 = x;
+        hp_y1 = 0.0f;
+        hp_y2 = 0.0f;
+
+        lp_x1 = 0.0f;
+        lp_x2 = 0.0f;
+        lp_y1 = 0.0f;
+        lp_y2 = 0.0f;
+
+        previousFiltered = 0.0f;
+        filterInitialized = true;
+    }
 
     return bandPassFilter(x);
 }
@@ -257,6 +270,11 @@ void QRSDetector::updateThreshold(
     {
         threshold = noisePeak;
     }
+
+    if (threshold < MIN_THRESHOLD)
+    {
+        threshold = MIN_THRESHOLD;
+    }
 }
 
 /************************************************
@@ -296,13 +314,7 @@ bool QRSDetector::acceptPeak(uint32_t peakTime)
     if (rr < MIN_RR_MS)
     {
         /*
-         * Too short.
-         *
-         * This is probably:
-         * - T-wave
-         * - noise
-         * - motion artifact
-         * - duplicate detection
+         * Too short (T-wave, duplicate spike).
          */
 
         return false;
@@ -311,11 +323,8 @@ bool QRSDetector::acceptPeak(uint32_t peakTime)
     if (rr > MAX_RR_MS)
     {
         /*
-         * Very long interval.
-         *
-         * We still update the reference peak because
-         * the next heartbeat should be measured from
-         * this real peak.
+         * Very long interval (strap shift or missed beats).
+         * Update baseline reference peak so next beat is valid.
          */
 
         lastPeakTime = peakTime;
@@ -358,8 +367,6 @@ bool QRSDetector::processSample(
 
     /**********************************************
      * Derivative
-     *
-     * Simple first derivative.
      **********************************************/
 
     float derivative =
@@ -375,7 +382,7 @@ bool QRSDetector::processSample(
         derivative * derivative;
 
     /**********************************************
-     * Moving Window Integration
+     * Moving Window Integration (150 ms = 75 samples)
      **********************************************/
 
     float mwi =
@@ -383,10 +390,6 @@ bool QRSDetector::processSample(
 
     /**********************************************
      * Startup period
-     *
-     * Allow filters and MWI to settle.
-     *
-     * First ~1 second is used for noise learning.
      **********************************************/
 
     if (startupTime == 0)
@@ -398,42 +401,39 @@ bool QRSDetector::processSample(
         timestamp - startupTime;
 
     /**********************************************
-     * Learn initial signal/noise level
+     * Startup learning phase
+     *
+     * 0 to 1000 ms: Let filters prime and settle
+     * 1000 to 2500 ms: Learn initial signal and noise peaks
      **********************************************/
 
     if (!initialized)
     {
-        /*
-         * Track the maximum observed MWI during
-         * startup.
-         */
-
-        if (mwi > signalPeak)
-        {
-            signalPeak = mwi;
-        }
-
-        /*
-         * Estimate noise from lower-level samples.
-         */
-
-        if (mwi > 0.0f)
-        {
-            if (noisePeak == 0.0f)
-            {
-                noisePeak = mwi;
-            }
-            else
-            {
-                noisePeak =
-                    0.01f * mwi +
-                    0.99f * noisePeak;
-            }
-        }
-
         if (startupElapsed >= 1000)
         {
-            if (signalPeak <= 0.0f)
+            if (mwi > signalPeak)
+            {
+                signalPeak = mwi;
+            }
+
+            if (mwi > 0.0f)
+            {
+                if (noisePeak == 0.0f)
+                {
+                    noisePeak = mwi;
+                }
+                else
+                {
+                    noisePeak =
+                        0.02f * mwi +
+                        0.98f * noisePeak;
+                }
+            }
+        }
+
+        if (startupElapsed >= 2500)
+        {
+            if (signalPeak <= noisePeak)
             {
                 signalPeak = noisePeak * 2.0f;
             }
@@ -443,14 +443,42 @@ bool QRSDetector::processSample(
                 0.25f *
                 (signalPeak - noisePeak);
 
+            if (threshold < MIN_THRESHOLD)
+            {
+                threshold = MIN_THRESHOLD;
+            }
+
             initialized = true;
         }
 
-        /*
-         * Don't detect beats during initialization.
-         */
-
+        previousMWISample = mwi;
         return false;
+    }
+
+    /**********************************************
+     * Adaptive threshold decay (Searchback mechanism)
+     *
+     * If no peak detected for > 1500 ms, gradually
+     * decay threshold and signal peak toward floor.
+     * At 500 Hz, 0.9995 decay reduces threshold ~22%/s.
+     **********************************************/
+
+    uint32_t timeSinceLastPeak = (hasLastPeak && lastPeakTime > 0) ? (timestamp - lastPeakTime) : startupElapsed;
+
+    if (timeSinceLastPeak > 1500)
+    {
+        threshold *= 0.9995f;
+        signalPeak *= 0.9995f;
+
+        if (threshold < MIN_THRESHOLD)
+        {
+            threshold = MIN_THRESHOLD;
+        }
+
+        if (signalPeak < threshold * 1.5f)
+        {
+            signalPeak = threshold * 2.0f;
+        }
     }
 
     /**********************************************
@@ -459,38 +487,13 @@ bool QRSDetector::processSample(
 
     if (timestamp < refractoryUntil)
     {
-        /*
-         * Still inside refractory period.
-         *
-         * Do not accept another beat.
-         */
-
-        if (mwi > threshold)
-        {
-            /*
-             * It is still useful to track the
-             * signal level, but never declare a peak.
-             */
-
-            if (mwi > signalPeak)
-            {
-                updateThreshold(mwi, true);
-            }
-        }
-
+        previousMWISample = mwi;
         return false;
     }
 
     /**********************************************
      * Local maximum detection
      **********************************************/
-
-    /*
-     * We don't declare an R peak merely because
-     * MWI crossed the threshold.
-     *
-     * We first find a local maximum.
-     */
 
     bool result = false;
 
@@ -502,10 +505,7 @@ bool QRSDetector::processSample(
     {
         if (!aboveThreshold)
         {
-            /*
-             * Start of QRS candidate.
-             */
-
+            // Start of QRS candidate
             aboveThreshold = true;
 
             candidatePeakValue = mwi;
@@ -514,12 +514,7 @@ bool QRSDetector::processSample(
         }
         else
         {
-            /*
-             * Still inside candidate.
-             *
-             * Keep the highest MWI value.
-             */
-
+            // Track highest MWI value inside candidate
             if (mwi > candidatePeakValue)
             {
                 candidatePeakValue = mwi;
@@ -534,45 +529,29 @@ bool QRSDetector::processSample(
 
     else if (aboveThreshold)
     {
-        /*
-         * MWI has fallen below threshold.
-         *
-         * The highest value inside the candidate
-         * region is now our QRS peak.
-         */
-
         aboveThreshold = false;
 
         uint32_t candidateDuration =
             timestamp - candidateStartTime;
 
         /******************************************
-         * Reject extremely long candidates
+         * Validate candidate pulse width
          ******************************************/
 
-        if (candidateDuration <= MAX_PEAK_SEARCH_MS)
+        if (candidateDuration >= MIN_PEAK_SEARCH_MS && candidateDuration <= MAX_PEAK_SEARCH_MS)
         {
-            /*
-             * Update signal estimate.
-             */
-
+            // Update signal estimate
             updateThreshold(
                 candidatePeakValue,
                 true);
 
-            /****************************************
-             * Accept actual R peak
-             ****************************************/
-
+            // Accept actual R peak
             result =
                 acceptPeak(candidatePeakTime);
         }
-        else
+        else if (candidateDuration > MAX_PEAK_SEARCH_MS)
         {
-            /*
-             * Probably movement / artifact.
-             */
-
+            // Pulse was too wide (motion artifact / DC swing) -> update noise estimate
             updateThreshold(
                 candidatePeakValue,
                 false);
@@ -581,23 +560,32 @@ bool QRSDetector::processSample(
         candidatePeakValue = 0.0f;
         candidatePeakTime = 0;
         candidateStartTime = 0;
+        mwiLocalPeak = 0.0f;
     }
 
     /**********************************************
-     * Noise estimation
+     * Noise estimation (track local peaks below threshold)
      **********************************************/
 
-    if (!aboveThreshold && mwi > 0.0f)
+    else
     {
-        /*
-         * Only update noise estimate when the signal
-         * is below the QRS threshold.
-         */
+        if (mwi > previousMWISample)
+        {
+            if (mwi > mwiLocalPeak)
+                mwiLocalPeak = mwi;
+        }
+        else if (previousMWISample > mwi && mwiLocalPeak > 0.0f)
+        {
+            // Local peak occurred below threshold -> update noise level
+            updateThreshold(
+                mwiLocalPeak,
+                false);
 
-        updateThreshold(
-            mwi,
-            false);
+            mwiLocalPeak = 0.0f;
+        }
     }
+
+    previousMWISample = mwi;
 
     /**********************************************
      * Return only when a VALID RR was generated
