@@ -36,6 +36,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Run synchronization safety unit tests
+        run: python3 -m unittest discover -s tests -p 'test_aura_sync.py' -v
+
       - name: Preflight credential
         env:
           DESTINATION_TOKEN: ${{ secrets.AURA_DESTINATION_TOKEN }}
