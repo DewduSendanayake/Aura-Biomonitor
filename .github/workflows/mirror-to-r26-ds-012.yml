@@ -1,0 +1,55 @@
+name: Mirror Aura firmware to R26-DS-012
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "31 * * * *"
+  workflow_dispatch:
+
+# Never run incoming PR code with a cross-repository write credential.
+# This file and scripts/aura_sync.py are always read from trusted source main.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: aura-biomonitor-rolling-destination-sync
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out trusted source main, not PR head
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Configure Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Preflight credential
+        env:
+          DESTINATION_TOKEN: ${{ secrets.AURA_DESTINATION_TOKEN }}
+        run: |
+          if [ -z "$DESTINATION_TOKEN" ]; then
+            echo "::error::Missing AURA_DESTINATION_TOKEN. Use a fine-grained PAT scoped to dulhara79/R26-DS-012 (Contents and Pull requests: write), or a narrowly-scoped GitHub App installation token."
+            exit 1
+          fi
+
+      - name: Reconcile and update rolling destination pull request
+        env:
+          SOURCE_READ_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AURA_DESTINATION_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          python3 scripts/aura_sync.py
