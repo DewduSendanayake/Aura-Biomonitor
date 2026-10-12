@@ -1,7 +1,7 @@
 name: Mirror Aura firmware to R26-DS-012
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, closed, ready_for_review, converted_to_draft]
   push:
@@ -10,7 +10,7 @@ on:
     - cron: "31 * * * *"
   workflow_dispatch:
 
-# Never run incoming PR code with a cross-repository write credential.
+# pull_request_target loads this workflow from trusted main. Never run incoming PR code with a cross-repository write credential.
 # This file and scripts/aura_sync.py are always read from trusted source main.
 permissions:
   contents: read
