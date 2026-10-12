@@ -1,12 +1,16 @@
-# Aura Biomonitor
+# Aura Biomonitor 
 
 ### Your chest already knows. Aura just listens.
 
-**Aura Biomonitor** is onboard firmware for a wearable chest strap that turns raw biosignals into clear, second-by-second health metrics — heart rhythm, breathing, temperature, and motion — then hands them to your phone over Bluetooth Low Energy.
+**Aura Biomonitor** is onboard firmware for a wearable chest strap that turns raw biosignals into clear, second-by-second health metrics: heart rhythm, breathing, temperature, and motion- then hands them to your phone over Bluetooth Low Energy.
+
+<p align="center">
+  <img src="Aura Chest Strap.png" alt="Aura Chest Strap" width="900"/>
+</p>
 
 This repository contains **Chest Strap V3** (`v1.0.2`): ESP32-C3 firmware that samples ECG and thoracic impedance at clinical-ish rates, runs QRS / HRV / respiration pipelines on-device, and streams a compact CSV health packet once per second.
 
-> Not a medical device. Metrics are for research, prototyping, and personal exploration — not diagnosis or treatment.
+> Not a medical device. Metrics are for research, prototyping, and personal exploration- not diagnosis or treatment.
 
 ---
 
@@ -18,7 +22,7 @@ Strap on. Electrodes find skin. Within a few seconds the strap decides you’re 
 timestamp, meanHR, meanRR, SDNN, RMSSD, meanBR, stdBR, meanTemp, stdTemp, meanAccMag, stdAccMag, isWorn
 ```
 
-Heart rate from real RR intervals. Breathing from impedance pneumography. Skin temperature with a rolling window. Motion as accel magnitude stats. Wear state as a hard gate — when you’re off body, physiology zeros out instead of inventing numbers.
+Heart rate from real RR intervals. Breathing from impedance pneumography. Skin temperature with a rolling window. Motion as accel magnitude stats. Wear state as a hard gate- when you’re off body, physiology zeros out instead of inventing numbers.
 
 ---
 
@@ -134,26 +138,6 @@ Floats use two decimal places. `isWorn` is `1` or `0`. When off-body, physiologi
 
 ---
 
-## Repo layout
-
-```
-Aura-Biomonitor-main/
-├── README.md                 ← you are here
-└── ChestStrap_V3/
-    ├── ChestStrap_V3.ino     ← entry point
-    ├── Config.h              ← pins, rates, FW name/version
-    ├── DataTypes.h           ← ECG / IMU / temp structs
-    ├── HealthEngine.*        ← metrics orchestration
-    ├── QRSDetector.*         ← R-peak detection
-    ├── HRVProcessor.*        ← HRV window
-    ├── ADS1292R.* / MPU6500.* / DS18B20.*
-    ├── BLE_UART.* / Scheduler.*
-    ├── Packet.* / CRC.*      ← helpers present; not on the live path yet
-    └── .vscode/              ← Arduino board config
-```
-
----
-
 ## Build & flash
 
 **Board:** MakerGO / ESP32-C3 Super Mini (`esp32:esp32:makergo_c3_supermini`)  
@@ -173,41 +157,8 @@ Aura-Biomonitor-main/
 4. Upload, open Serial Monitor at **115200**.
 5. Connect a NUS-capable BLE client to `ChestStrap_V3` and subscribe to TX notifies.
 
----
-
-## Project status
-
-| Capability | Status |
-|------------|--------|
-| ECG + impedance acquisition | Done |
-| IMU + body temperature | Done |
-| Wear / lead-off gating | Done |
-| QRS / heart rate | Done |
-| HRV (SDNN, RMSSD) | Done |
-| Respiration rate | Done |
-| BLE CSV streaming (1 Hz) | Done |
-| Live raw ECG over BLE | Not yet |
-| Binary + CRC protocol | Scaffolded (`Packet` / `CRC`), unused |
-| Battery monitoring | Not yet |
-| Companion app in this repo | Not included |
 
 ---
 
-## Roadmap (honest edition)
-
-The old “planned” list already shipped for HR, HRV, filtering, and respiration. What’s still ahead:
-
-- Binary framed BLE with CRC integrity
-- Live ECG / impedance visualization stream
-- Session recording & battery telemetry
-- Stronger activity / step classification (export motion flags)
-- Stress / recovery scoring on top of HRV
-- Mobile companion app
-
----
-
-## License & care
-
-No license file is bundled in this tree yet — add one before you redistribute.
 
 Treat electrode contact, hygiene, and electrical safety seriously. This firmware is a biomonitoring **prototype**, not a clinical instrument.
