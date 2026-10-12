@@ -5,7 +5,7 @@
 **Aura Biomonitor** is onboard firmware for a wearable chest strap that turns raw biosignals into clear, second-by-second health metrics: heart rhythm, breathing, temperature, and motion- then hands them to your phone over Bluetooth Low Energy.
 
 <p align="center">
-  <img src="Aura Chest Strap.png" alt="Aura Chest Strap" width="900"/>
+  <img src="Aura Chest Strap.png" alt="Aura Chest Strap" width="400"/>
 </p>
 
 This repository contains **Chest Strap V3** (`v1.0.2`): ESP32-C3 firmware that samples ECG and thoracic impedance at clinical-ish rates, runs QRS / HRV / respiration pipelines on-device, and streams a compact CSV health packet once per second.
